@@ -78,6 +78,77 @@ run_game() {
         exit 1
     fi
 
+    # Handle Remote ROMs: Download from WebDAV if accessing from remote/ folder
+    if [[ "$game" == */remote/* ]]; then
+        local remote_rom_path="$game"
+        local system_name
+        system_name=$(echo "$game" | grep -oP '(?<=roms/)[^/]+')
+        local rom_name
+        rom_name=$(basename "$game")
+        local local_rom_path="$roms_path/$system_name/$rom_name"
+        local temp_download_path="$roms_path/$system_name/.${rom_name}.part"
+
+        # Check if already downloaded locally
+        if [[ ! -f "$local_rom_path" ]]; then
+            log i "Remote ROM detected: $rom_name - downloading to local storage..."
+
+            # Clean up any partial download
+            rm -f "$temp_download_path"
+
+            # Show download progress dialog and download atomically
+            (
+                echo "0"
+                echo "# Downloading $rom_name from remote storage..."
+
+                # Copy to temp file first (atomic download)
+                if cp "$remote_rom_path" "$temp_download_path"; then
+                    # Verify file was downloaded completely
+                    if [[ -s "$temp_download_path" ]]; then
+                        # Atomic move to final location
+                        if mv "$temp_download_path" "$local_rom_path"; then
+                            echo "100"
+                            echo "# Download complete!"
+                        else
+                            echo "100"
+                            echo "# Failed to finalize download!"
+                            rm -f "$temp_download_path"
+                            exit 1
+                        fi
+                    else
+                        echo "100"
+                        echo "# Downloaded file is empty!"
+                        rm -f "$temp_download_path"
+                        exit 1
+                    fi
+                else
+                    echo "100"
+                    echo "# Download failed!"
+                    rm -f "$temp_download_path"
+                    exit 1
+                fi
+            ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
+                --title "RetroDECK - Downloading ROM" \
+                --text="Downloading $rom_name from remote storage..." \
+                --width=400 --height=100
+
+            if [[ -f "$local_rom_path" ]]; then
+                log i "Successfully downloaded $rom_name to $local_rom_path"
+                game="$local_rom_path"
+            else
+                log e "Failed to download $rom_name"
+                rd_zenity --icon-name=net.retrodeck.retrodeck --error --no-wrap \
+                    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+                    --title "RetroDECK - Download Failed" \
+                    --text="Failed to download <span foreground='$purple'><b>$rom_name</b></span> from remote storage.\n\nPlease check your WebDAV connection and try again."
+                exit 1
+            fi
+        else
+            # Already downloaded, use local copy
+            log i "ROM $rom_name already downloaded locally, using local copy"
+            game="$local_rom_path"
+        fi
+    fi
+
     # Step 1: System Recognition
     if [[ -z "$system" ]]; then
         # Automatically detect system from game path

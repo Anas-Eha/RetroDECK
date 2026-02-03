@@ -1589,13 +1589,23 @@ configurator_remote_roms_test_dialog() {
   # Dialog to test WebDAV connection
   log i "Testing WebDAV connection"
 
-  local result=$(remote_roms_test_connection)
+  local result
+  result=$(remote_roms_test_connection)
 
-  if [[ "$result" == "true" ]]; then
-    configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection successful!</b></span>\n\nYour WebDAV server is reachable and credentials are valid."
-  else
-    configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check:\n• WebDAV URL is correct\n• Username and password are correct\n• Server is accessible\n• rclone is installed"
-  fi
+  case "$result" in
+    "connected")
+      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection successful!</b></span>\n\nYour WebDAV server is reachable and credentials are valid."
+      ;;
+    "missing_config")
+      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Configuration incomplete.</b></span>\n\nPlease set the WebDAV URL, username, and password first."
+      ;;
+    "rclone_not_found")
+      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>rclone not found.</b></span>\n\nrclone is required for WebDAV connections. Please ensure it's installed."
+      ;;
+    "connection_failed"|*)
+      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check:\n• WebDAV URL is correct\n• Username and password are correct\n• Server is accessible\n• Network connection is working"
+      ;;
+  esac
 
   configurator_remote_roms_dialog
 }
