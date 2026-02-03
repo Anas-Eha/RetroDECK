@@ -1257,6 +1257,379 @@ configurator_iconset_toggle_dialog() {
   configurator_global_presets_and_settings_dialog
 }
 
+# ============================================
+# Remote ROMs Folder Dialog Functions
+# ============================================
+
+configurator_remote_roms_dialog() {
+  # Main dialog for Remote ROMs folder configuration
+  # USAGE: configurator_remote_roms_dialog
+
+  log i "Opening Remote ROMs dialog"
+
+  # Initialize config if needed
+  remote_roms_init_config
+
+  local global_enabled=$(remote_roms_is_global_enabled)
+  local status_text="Disabled"
+  [[ "$global_enabled" == "true" ]] && status_text="Enabled"
+
+  local menu_options=(
+    "Connection Settings" "Configure WebDAV server URL, username and password"
+    "Manage Mounts" "Add, remove or configure individual system mounts"
+    "Mount All" "Mount all enabled remote ROM folders"
+    "Unmount All" "Unmount all remote ROM folders"
+    "Test Connection" "Test the WebDAV connection"
+    "Global Enable/Disable" "Currently: $status_text"
+  )
+
+  choice=$(rd_zenity --list \
+    --title "RetroDECK Configurator - Remote ROMs Folder" \
+    --cancel-label="Back" --ok-label="Select" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --width=1200 --height=720 \
+    --column="Option" --column="Description" \
+    "${menu_options[@]}")
+
+  local rc=$?
+
+  if [[ $rc -ne 0 || -z "$choice" ]]; then
+    configurator_data_management_dialog
+    return
+  fi
+
+  case "$choice" in
+    "Connection Settings")
+      configurator_remote_roms_connection_dialog
+      ;;
+    "Manage Mounts")
+      configurator_remote_roms_mounts_dialog
+      ;;
+    "Mount All")
+      configurator_remote_roms_mount_all_dialog
+      ;;
+    "Unmount All")
+      configurator_remote_roms_unmount_all_dialog
+      ;;
+    "Test Connection")
+      configurator_remote_roms_test_dialog
+      ;;
+    "Global Enable/Disable")
+      configurator_remote_roms_toggle_global_dialog
+      ;;
+    *)
+      configurator_remote_roms_dialog
+      ;;
+  esac
+}
+
+configurator_remote_roms_connection_dialog() {
+  # Dialog for configuring WebDAV connection settings
+  # USAGE: configurator_remote_roms_connection_dialog
+
+  log i "Opening Remote ROMs connection dialog"
+
+  local current_url=$(remote_roms_get_setting "webdav_url")
+  local current_user=$(remote_roms_get_setting "webdav_user")
+
+  local form_result=$(rd_zenity --forms \
+    --title "RetroDECK Configurator - WebDAV Connection" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --text="Configure your WebDAV server connection settings.\n\n<span foreground='$purple'><b>The source folder should contain subfolders like /gba, /snes, /ps2 etc.</b></span>" \
+    --add-entry="WebDAV URL (e.g., https://myserver.com/webdav):$current_url" \
+    --add-entry="Username:$current_user" \
+    --add-password="Password:")
+
+  local rc=$?
+
+  if [[ $rc -ne 0 || -z "$form_result" ]]; then
+    configurator_remote_roms_dialog
+    return
+  fi
+
+  # Parse form results (pipe-separated)
+  local url=$(echo "$form_result" | cut -d'|' -f1)
+  local user=$(echo "$form_result" | cut -d'|' -f2)
+  local pass=$(echo "$form_result" | cut -d'|' -f3)
+
+  if [[ -z "$url" || -z "$user" ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>URL and Username are required.</b></span>\n\nPlease enter both values."
+    configurator_remote_roms_connection_dialog
+    return
+  fi
+
+  remote_roms_save_webdav_config "$url" "$user" "$pass"
+
+  configurator_generic_dialog "RetroDECK Configurator - Settings Saved" "<span foreground='$purple'><b>WebDAV connection settings saved.</b></span>\n\nYou can now test the connection or configure mounts."
+  configurator_remote_roms_dialog
+}
+
+configurator_remote_roms_mounts_dialog() {
+  # Dialog for managing individual system mounts
+  # USAGE: configurator_remote_roms_mounts_dialog
+
+  log i "Opening Remote ROMs mounts dialog"
+
+  local mounts=$(remote_roms_get_mounts)
+  local mount_count=$(echo "$mounts" | jq 'length')
+
+  if [[ $mount_count -eq 0 ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - No Mounts" "<span foreground='$purple'><b>No mounts configured yet.</b></span>\n\nClick OK to add your first mount."
+    configurator_remote_roms_add_mount_dialog
+    return
+  fi
+
+  # Build menu array
+  local menu_options=()
+  while IFS= read -r system; do
+    if [[ -n "$system" ]]; then
+      local config=$(echo "$mounts" | jq --arg s "$system" '.[$s]')
+      local enabled=$(echo "$config" | jq -r '.enabled')
+      local remote_path=$(echo "$config" | jq -r '.remote_path')
+      local is_mounted=$(remote_roms_is_mounted "$system")
+
+      local status="Disabled"
+      [[ "$enabled" == "true" ]] && status="Enabled"
+      [[ "$is_mounted" == "true" ]] && status="Mounted"
+
+      menu_options+=("$system" "$status - $remote_path")
+    fi
+  done < <(echo "$mounts" | jq -r 'keys[]')
+
+  menu_options+=("Add New Mount" "Configure a new system folder to mount")
+
+  choice=$(rd_zenity --list \
+    --title "RetroDECK Configurator - Manage Mounts" \
+    --cancel-label="Back" --ok-label="Select" \
+    --extra-button="Remove Selected" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --width=1200 --height=720 \
+    --column="System" --column="Status" \
+    "${menu_options[@]}")
+
+  local rc=$?
+
+  if [[ $rc -ne 0 && -z "$choice" ]]; then
+    configurator_remote_roms_dialog
+    return
+  fi
+
+  if [[ "$choice" == "Add New Mount" ]]; then
+    configurator_remote_roms_add_mount_dialog
+  elif [[ -n "$choice" ]]; then
+    # Check if Remove was clicked
+    if [[ $rc -eq 0 && -n "$choice" ]]; then
+      # Check if extra button was used (Remove Selected)
+      # Zenity returns the selection when extra button is clicked
+      configurator_remote_roms_edit_mount_dialog "$choice"
+    fi
+  else
+    configurator_remote_roms_mounts_dialog
+  fi
+}
+
+configurator_remote_roms_add_mount_dialog() {
+  # Dialog for adding a new mount
+  # USAGE: configurator_remote_roms_add_mount_dialog
+
+  log i "Opening add mount dialog"
+
+  # Get available systems
+  local available_systems=$(remote_roms_get_available_systems)
+  local configured_systems=$(remote_roms_get_mounts | jq -r 'keys[]')
+
+  # Filter out already configured systems
+  local unconfigured=()
+  for system in $available_systems; do
+    if ! echo "$configured_systems" | grep -q "^${system}$"; then
+      unconfigured+=("$system")
+    fi
+  done
+
+  if [[ ${#unconfigured[@]} -eq 0 ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - No Systems Available" "<span foreground='$purple'><b>All available systems are already configured.</b></span>\n\nRemove an existing mount to add a new one."
+    configurator_remote_roms_mounts_dialog
+    return
+  fi
+
+  # Build system selection
+  local system_list=$(printf "%s\n" "${unconfigured[@]}")
+
+  local form_result=$(rd_zenity --forms \
+    --title "RetroDECK Configurator - Add Mount" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --text="Configure a new remote ROM mount.\n\n<span foreground='$purple'><b>The remote path is relative to your WebDAV root.</b></span>\nExample: If your ROMs are at /roms/gba on the server, enter 'roms/gba'" \
+    --add-combo="System:" --combo-values="$system_list" \
+    --add-entry="Remote Path (e.g., roms/gba):" \
+    --add-entry="Custom Cache Size (optional, e.g., 10G):")
+
+  local rc=$?
+
+  if [[ $rc -ne 0 || -z "$form_result" ]]; then
+    configurator_remote_roms_mounts_dialog
+    return
+  fi
+
+  local system=$(echo "$form_result" | cut -d'|' -f1)
+  local remote_path=$(echo "$form_result" | cut -d'|' -f2)
+  local cache_size=$(echo "$form_result" | cut -d'|' -f3)
+
+  if [[ -z "$system" || -z "$remote_path" ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>System and Remote Path are required.</b></span>"
+    configurator_remote_roms_add_mount_dialog
+    return
+  fi
+
+  remote_roms_add_mount "$system" "$remote_path" "$cache_size"
+
+  configurator_generic_dialog "RetroDECK Configurator - Mount Added" "<span foreground='$purple'><b>Mount added for $system.</b></span>\n\nRemote path: $remote_path"
+  configurator_remote_roms_mounts_dialog
+}
+
+configurator_remote_roms_edit_mount_dialog() {
+  # Dialog for editing an existing mount
+  # USAGE: configurator_remote_roms_edit_mount_dialog "$system"
+
+  local system="$1"
+  log i "Opening edit mount dialog for $system"
+
+  local config=$(remote_roms_get_mounts | jq --arg s "$system" '.[$s]')
+  local enabled=$(echo "$config" | jq -r '.enabled')
+  local remote_path=$(echo "$config" | jq -r '.remote_path')
+  local cache_size=$(echo "$config" | jq -r '.cache_size // ""')
+  local is_mounted=$(remote_roms_is_mounted "$system")
+
+  local status_text="Not Mounted"
+  [[ "$is_mounted" == "true" ]] && status_text="Currently Mounted"
+
+  local toggle_text="Enable Mount"
+  [[ "$enabled" == "true" ]] && toggle_text="Disable Mount"
+
+  local menu_options=(
+    "$toggle_text" "Toggle this mount on/off"
+    "Mount Now" "$status_text"
+    "Unmount Now" "Unmount this system"
+    "Remove Mount" "Delete this mount configuration"
+  )
+
+  choice=$(rd_zenity --list \
+    --title "RetroDECK Configurator - Edit Mount: $system" \
+    --cancel-label="Back" --ok-label="Select" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --width=1200 --height=720 \
+    --column="Action" --column="Status" \
+    "${menu_options[@]}")
+
+  local rc=$?
+
+  if [[ $rc -ne 0 || -z "$choice" ]]; then
+    configurator_remote_roms_mounts_dialog
+    return
+  fi
+
+  case "$choice" in
+    "Enable Mount")
+      remote_roms_toggle_mount "$system" "true"
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Mount enabled for $system.</b></span>"
+      ;;
+    "Disable Mount")
+      remote_roms_toggle_mount "$system" "false"
+      remote_roms_unmount_system "$system"
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Mount disabled for $system.</b></span>"
+      ;;
+    "Mount Now")
+      if remote_roms_mount_system "$system"; then
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system mounted successfully.</b></span>"
+      else
+        configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>Failed to mount $system.</b></span>\n\nCheck the logs for details."
+      fi
+      ;;
+    "Unmount Now")
+      remote_roms_unmount_system "$system"
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system unmounted.</b></span>"
+      ;;
+    "Remove Mount")
+      remote_roms_remove_mount "$system"
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Mount removed for $system.</b></span>"
+      configurator_remote_roms_mounts_dialog
+      return
+      ;;
+  esac
+
+  configurator_remote_roms_edit_mount_dialog "$system"
+}
+
+configurator_remote_roms_mount_all_dialog() {
+  # Dialog to mount all enabled systems
+  log i "Mounting all enabled remote ROM systems"
+
+  (
+    remote_roms_mount_all
+  ) |
+  rd_zenity --progress --no-cancel --pulsate --auto-close \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --title "RetroDECK Configurator - Mounting Remote ROMs" \
+    --text="<span foreground='$purple'><b>Mounting remote ROM folders...</b></span>\n\nThis may take a moment."
+
+  configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Mount operation complete.</b></span>\n\nCheck the logs for details."
+  configurator_remote_roms_dialog
+}
+
+configurator_remote_roms_unmount_all_dialog() {
+  # Dialog to unmount all systems
+  log i "Unmounting all remote ROM systems"
+
+  remote_roms_unmount_all
+
+  configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>All remote ROM folders unmounted.</b></span>"
+  configurator_remote_roms_dialog
+}
+
+configurator_remote_roms_test_dialog() {
+  # Dialog to test WebDAV connection
+  log i "Testing WebDAV connection"
+
+  local result=$(remote_roms_test_connection)
+
+  if [[ "$result" == "true" ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection successful!</b></span>\n\nYour WebDAV server is reachable and credentials are valid."
+  else
+    configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check:\n• WebDAV URL is correct\n• Username and password are correct\n• Server is accessible\n• rclone is installed"
+  fi
+
+  configurator_remote_roms_dialog
+}
+
+configurator_remote_roms_toggle_global_dialog() {
+  # Dialog to enable/disable remote ROMs globally
+  local current=$(remote_roms_is_global_enabled)
+
+  if [[ "$current" == "true" ]]; then
+    rd_zenity --question \
+      --title "RetroDECK Configurator - Disable Remote ROMs" \
+      --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+      --text="<span foreground='$purple'><b>Disable Remote ROMs?</b></span>\n\nThis will unmount all remote folders and disable the feature."
+
+    if [[ $? -eq 0 ]]; then
+      remote_roms_unmount_all
+      remote_roms_set_global_enabled "false"
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Remote ROMs disabled.</b></span>"
+    fi
+  else
+    rd_zenity --question \
+      --title "RetroDECK Configurator - Enable Remote ROMs" \
+      --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+      --text="<span foreground='$purple'><b>Enable Remote ROMs?</b></span>\n\nThis will allow mounting remote WebDAV folders.\n\nMake sure you have configured the connection settings first."
+
+    if [[ $? -eq 0 ]]; then
+      remote_roms_set_global_enabled "true"
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Remote ROMs enabled.</b></span>\n\nYou can now mount your configured folders."
+    fi
+  fi
+
+  configurator_remote_roms_dialog
+}
+
 finit_install_controller_profile_dialog() {
   get_steam_user "finit"
   if [[ -n "$steam_id" ]]; then
