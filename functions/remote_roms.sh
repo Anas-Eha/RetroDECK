@@ -146,6 +146,8 @@ EOF
   fi
 
   # Cleanup
+
+  # Cleanup
   rm -f "$rclone_config"
   remote_roms_log_debug "test_connection: Cleaned up temp config"
 
@@ -271,7 +273,7 @@ remote_roms_generate_rclone_config() {
 type = webdav
 url = $url
 vendor = other
-user = $user
+user =$user
 pass = $obscured_pass
 EOF
 
@@ -283,6 +285,8 @@ EOF
 
 remote_roms_mount_system() {
   # Mount a specific system
+  # Remote is mounted to roms/<system>/remote/ (visible)
+  # Downloaded files go to roms/<system>/ (local cache)
   # Remote is mounted to roms/<system>/remote/ (visible)
   # Downloaded files go to roms/<system>/ (local cache)
   # USAGE: remote_roms_mount_system "$system"
@@ -417,7 +421,9 @@ EOF
     --vfs-read-ahead="$read_ahead" \
     --vfs-cache-max-size="$cache_size" \
     --cache-dir="$system_path/.vfs-cache" \
+    --cache-dir="$system_path/.vfs-cache" \
     --allow-other --allow-non-empty --daemon \
+    --log-file="$logs_path/rclone-$system.log"; then
     --log-file="$logs_path/rclone-$system.log"; then
 
     log i "Mounted $system remote to $remote_visible"
@@ -512,6 +518,8 @@ remote_roms_is_mounted() {
   # USAGE: if [[ $(remote_roms_is_mounted "$system") == "true" ]]; then ...
 
   local system="$1"
+  local mount_point="$roms_path/$system/remote"
+  if mountpoint -q "$mount_point" 2>/dev/null; then
   local mount_point="$roms_path/$system/remote"
   if mountpoint -q "$mount_point" 2>/dev/null; then
     echo "true"
