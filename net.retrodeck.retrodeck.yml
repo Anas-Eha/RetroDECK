@@ -231,6 +231,10 @@ modules:
       - type: archive
         url: https://github.com/libfuse/libfuse/releases/download/fuse-3.16.2/fuse-3.16.2.tar.gz
         sha256: f797055d9296b275e981f5f62d4e32e089614fc253d1ef2985851025b8a0ce87
+    post-install:
+      # Enable user_allow_other for FUSE mounts (required for rclone --allow-other)
+      - mkdir -p /app/etc
+      - echo "user_allow_other" > /app/etc/fuse.conf
     cleanup:
       - /include
       - /lib/pkgconfig

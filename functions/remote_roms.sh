@@ -8,7 +8,7 @@
 # The cache only helps with directory listing and copy performance
 readonly REMOTE_ROMS_DEFAULT_VFS_CACHE_MODE="writes"
 readonly REMOTE_ROMS_DEFAULT_VFS_READ_AHEAD="0"
-readonly REMOTE_ROMS_DEFAULT_VFS_CACHE_MAX_SIZE="500M"
+readonly REMOTE_ROMS_DEFAULT_VFS_CACHE_MAX_SIZE="50M"
 
 # Debug log file for remote_roms operations
 readonly REMOTE_ROMS_DEBUG_LOG="$rd_xdg_config_logs_path/remote_roms_debug.log"
@@ -295,8 +295,6 @@ remote_roms_mount_system() {
   # Mount a specific system
   # Remote is mounted to roms/<system>/remote/ (visible)
   # Downloaded files go to roms/<system>/ (local cache)
-  # Remote is mounted to roms/<system>/remote/ (visible)
-  # Downloaded files go to roms/<system>/ (local cache)
   # USAGE: remote_roms_mount_system "$system"
 
   local system system_path remote_visible mount_config enabled remote_path
@@ -376,23 +374,6 @@ remote_roms_mount_system() {
   mkdir -p "$remote_visible"
   remote_roms_log_debug "mount_system: Created directories - system_path exists: $([[ -d "$system_path" ]] && echo 'yes' || echo 'no')"
   remote_roms_log_debug "mount_system: Created directories - remote_visible exists: $([[ -d "$remote_visible" ]] && echo 'yes' || echo 'no')"
-
-  # Create README to explain the structure
-  cat > "$system_path/README.txt" << 'EOF'
-Remote ROMs Folder Structure
-============================
-
-remote/ - Mounted WebDAV folder (browse all remote ROMs here)
-*.gba, *.zip, etc. - Downloaded ROMs appear here after first launch
-
-How it works:
-1. Browse the "remote/" folder to see all available ROMs on your WebDAV
-2. Click any ROM in "remote/" to play
-3. The ROM is downloaded to this folder automatically
-4. Next time, the local copy is used (works offline!)
-
-Tip: ROMs you play often will be in this main folder for fast access.
-EOF
 
   # Build and log the rclone mount command
   local rclone_cmd="rclone mount"
@@ -540,31 +521,36 @@ remote_roms_get_available_systems() {
   # Get list of available RetroDECK systems for remote ROMs
   # Returns: Space-separated list of system folder names (gba snes ps2 etc.)
   # This is used by the discovery dialog to match remote folders
+  # Sources systems from bios.json reference file for consistency
 
-  # Check if roms_path is set and exists
-  if [[ -z "$roms_path" || ! -d "$roms_path" ]]; then
-    # Return default common systems if roms_path not available
-    echo "3do amiga arcade atari2600 atari5200 atari7800 atarilynx c64 coleco dreamcast famicom fds gamegear gb gba gbc genesis intellivision jaguar mastersystem megacd megadrive n64 nds neogeo neogeocd nes ngp ngpc odyssey2 pcengine pcenginecd pico8 pokemini ps2 ps3 psp psx saturn scummvm sega32x segacd sfc sg1000 snes switch tg16 tg16cd tic80 vb vectrex vic20 virtualboy wonderswan wonderswancolor x68000 xbox zxspectrum"
+  # First try to get systems from actual roms folder
+  if [[ -n "$roms_path" && -d "$roms_path" ]]; then
+    local systems=""
+    for dir in "$roms_path"/*/; do
+      if [[ -d "$dir" ]]; then
+        local sysname=$(basename "$dir")
+        # Skip special directories
+        [[ "$sysname" == "remote" || "$sysname" == "downloaded" ]] && continue
+        systems="$systems $sysname"
+      fi
+    done
+    # If we found actual systems, return them
+    if [[ -n "$systems" ]]; then
+      echo "$systems"
+      return 0
+    fi
+  fi
+
+  # Fallback: extract unique system names from bios.json reference file
+  # This ensures consistency with RetroDECK's supported systems
+  if [[ -f "$bios_checklist" ]]; then
+    jq -r '.bios[].system' "$bios_checklist" 2>/dev/null | sort -u | tr '\n' ' '
     return 0
   fi
 
-  # Get actual system folders from roms directory
-  local systems=""
-  for dir in "$roms_path"/*/; do
-    if [[ -d "$dir" ]]; then
-      local sysname=$(basename "$dir")
-      # Skip special directories
-      [[ "$sysname" == "remote" || "$sysname" == "downloaded" ]] && continue
-      systems="$systems $sysname"
-    fi
-  done
-
-  # If no systems found in roms folder, return defaults
-  if [[ -z "$systems" ]]; then
-    systems="3do amiga arcade atari2600 atari5200 atari7800 atarilynx c64 coleco dreamcast famicom fds gamegear gb gba gbc genesis intellivision jaguar mastersystem megacd megadrive n64 nds neogeo neogeocd nes ngp ngpc odyssey2 pcengine pcenginecd pico8 pokemini ps2 ps3 psp psx saturn scummvm sega32x segacd sfc sg1000 snes switch tg16 tg16cd tic80 vb vectrex vic20 virtualboy wonderswan wonderswancolor x68000 xbox zxspectrum"
-  fi
-
-  echo "$systems"
+  # Final fallback: return empty (caller should handle gracefully)
+  echo ""
+  return 1
 }
 
 # ============================================
