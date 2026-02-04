@@ -41,6 +41,7 @@
     "rd_logging_level": "info",
     "portmaster_reload_esde": "true",
     "portmaster_show": "true",
+    "remote_roms_automount": "true",
     "iconset": "lahrs-main"
   },
   "presets": {}

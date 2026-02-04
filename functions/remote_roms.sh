@@ -40,9 +40,6 @@ remote_roms_init_config() {
       "webdav_url": "",
       "webdav_user": "",
       "webdav_pass": "",
-      "vfs_cache_mode": "'"$REMOTE_ROMS_DEFAULT_VFS_CACHE_MODE"'",
-      "vfs_read_ahead": "'"$REMOTE_ROMS_DEFAULT_VFS_READ_AHEAD"'",
-      "vfs_cache_max_size": "'"$REMOTE_ROMS_DEFAULT_VFS_CACHE_MAX_SIZE"'",
       "mounts": {},
       "global_enabled": false
     }'
@@ -166,28 +163,23 @@ EOF
 
 remote_roms_add_mount() {
   # Add a system mount configuration
-  # USAGE: remote_roms_add_mount "$system" "$remote_path" "$cache_size"
+  # USAGE: remote_roms_add_mount "$system" "$remote_path"
 
   local system="$1"
   local remote_path="$2"
-  local cache_size="${3:-}"
 
   remote_roms_log_debug "add_mount: ====== ADDING MOUNT ======"
   remote_roms_log_debug "add_mount: system=$system"
   remote_roms_log_debug "add_mount: remote_path=$remote_path"
-  remote_roms_log_debug "add_mount: cache_size=${cache_size:-'(default)'}"
-
 
   local mount_obj=$(jq -n \
     --arg system "$system" \
     --arg remote_path "$remote_path" \
-    --arg cache_size "$cache_size" \
     '{
       "system": $system,
       "remote_path": $remote_path,
       "enabled": true,
-      "automount": false,
-      "cache_size": (if $cache_size == "" then null else $cache_size end)
+      "automount": false
     }')
 
   jq --arg system "$system" --argjson obj "$mount_obj" '.remote_roms.mounts[$system] = $obj' "$rd_conf" > "$rd_conf.tmp" && mv "$rd_conf.tmp" "$rd_conf"
@@ -298,7 +290,7 @@ remote_roms_mount_system() {
   # USAGE: remote_roms_mount_system "$system"
 
   local system system_path remote_visible mount_config enabled remote_path
-  local custom_cache cache_mode read_ahead cache_size
+  local cache_mode read_ahead cache_size
 
   system="$1"
   system_path="$roms_path/$system"
@@ -345,9 +337,7 @@ remote_roms_mount_system() {
   [[ "$enabled" != "true" ]] && { remote_roms_log_debug "mount_system: Mount not enabled, skipping"; return 0; }
 
   remote_path=$(echo "$mount_config" | jq -r '.remote_path')
-  custom_cache=$(echo "$mount_config" | jq -r '.cache_size // empty')
   remote_roms_log_debug "mount_system: remote_path=$remote_path"
-  remote_roms_log_debug "mount_system: custom_cache=$custom_cache"
 
   remote_roms_log_debug "mount_system: Generating rclone config..."
   remote_roms_generate_rclone_config
@@ -357,17 +347,16 @@ remote_roms_mount_system() {
     return 1
   fi
 
-  # Get VFS settings
-  cache_mode=$(remote_roms_get_setting "vfs_cache_mode")
-  read_ahead=$(remote_roms_get_setting "vfs_read_ahead")
-  cache_size=$(remote_roms_get_setting "vfs_cache_max_size")
+  # Use VFS defaults directly (simpler, no config needed)
+  # VFS cache helps with directory listing but files are copied locally anyway
+  local cache_mode="$REMOTE_ROMS_DEFAULT_VFS_CACHE_MODE"
+  local read_ahead="$REMOTE_ROMS_DEFAULT_VFS_READ_AHEAD"
+  local cache_size="$REMOTE_ROMS_DEFAULT_VFS_CACHE_MAX_SIZE"
 
   remote_roms_log_debug "mount_system: VFS settings - cache_mode=$cache_mode, read_ahead=$read_ahead, cache_size=$cache_size"
 
 
-  # Use custom cache size if set
-  [[ -n "$custom_cache" ]] && cache_size="$custom_cache"
-  [[ -n "$custom_cache" ]] && remote_roms_log_debug "mount_system: Using custom cache_size=$cache_size"
+
 
   # Create directories
   mkdir -p "$system_path"
@@ -491,6 +480,57 @@ remote_roms_mount_all() {
   log i "Mounted $count systems"
   remote_roms_log_debug "mount_all: Total systems mounted: $count"
   remote_roms_log_debug "mount_all: ====== END MOUNT ALL ======"
+}
+
+remote_roms_mount_automount_enabled() {
+  # Mount only systems with automount=true (called at startup)
+  # Non-blocking - failures are logged but don't stop RetroDECK startup
+  # Controlled by global "automount_on_startup" setting in config
+  # USAGE: remote_roms_mount_automount_enabled
+
+  log i "Checking for auto-mount enabled remote ROM systems"
+  remote_roms_log_debug "mount_automount: ====== START AUTOMOUNT ======"
+
+  # Initialize config if needed
+  remote_roms_init_config
+
+  # Check global automount setting using get_setting_value like portmaster_show
+  # This allows user to disable automount via retrodeck.cfg: remote_roms_automount="false"
+  if [[ $(get_setting_value "$rd_conf" "remote_roms_automount" "retrodeck" "options") == "false" ]]; then
+    remote_roms_log_debug "mount_automount: Global remote_roms_automount is disabled, skipping"
+    return 0
+  fi
+
+  local mounts=$(remote_roms_get_mounts)
+  local count=0
+
+  remote_roms_log_debug "mount_automount: Found mounts config: $mounts"
+
+  # Check if there are any automount-enabled systems
+  local automount_count=$(echo "$mounts" | jq -r '[to_entries[] | select(.value.automount == true)] | length')
+  remote_roms_log_debug "mount_automount: Found $automount_count systems with automount enabled"
+
+  if [[ "$automount_count" -eq 0 ]]; then
+    remote_roms_log_debug "mount_automount: No auto-mount systems configured, skipping"
+    return 0
+  fi
+
+  # Mount only automount-enabled systems
+  while IFS= read -r system; do
+    if [[ -n "$system" ]]; then
+      remote_roms_log_debug "mount_automount: Auto-mounting: $system"
+      if remote_roms_mount_system "$system"; then
+        ((count++))
+        remote_roms_log_debug "mount_automount: $system auto-mounted successfully"
+      else
+        remote_roms_log_debug "mount_automount: $system auto-mount failed (will retry on next startup)"
+      fi
+    fi
+  done < <(echo "$mounts" | jq -r 'to_entries[] | select(.value.automount == true) | .key')
+
+  log i "Auto-mounted $count/$automount_count remote ROM systems"
+  remote_roms_log_debug "mount_automount: Total systems auto-mounted: $count"
+  remote_roms_log_debug "mount_automount: ====== END AUTOMOUNT ======"
 }
 
 remote_roms_unmount_all() {

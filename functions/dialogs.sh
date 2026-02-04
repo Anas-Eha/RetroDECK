@@ -1440,12 +1440,13 @@ $sub_folders"
 
   log d "Discovery found folders: $discovered_folders"
 
-  # Build the management list
+  # Build the management list and auto-enable discovered systems
   local menu_options=()
   local available_systems=$(remote_roms_get_available_systems)
   local found_count=0
+  local auto_enabled_count=0
 
-  # Add discovered folders that match available systems
+  # Auto-enable and automount discovered folders that match available systems
   while IFS= read -r folder; do
     if [[ -n "$folder" ]]; then
       log d "Checking folder: $folder"
@@ -1473,11 +1474,27 @@ $sub_folders"
           [[ "$automount" == "true" ]] && status="${status} (Auto)"
           menu_options+=("$matching_system" "$status - Path: $folder")
         else
-          menu_options+=("$matching_system" "Not configured - Path: $folder")
+          # AUTO-ENABLE: New system found - add with automount enabled
+          log i "Auto-enabling remote ROMs for $matching_system (folder: $folder)"
+          remote_roms_add_mount "$matching_system" "$folder"
+          remote_roms_set_mount_automount "$matching_system" "true"
+          ((auto_enabled_count++))
+          
+          # Try to mount immediately
+          if remote_roms_mount_system "$matching_system"; then
+            menu_options+=("$matching_system" "Auto-enabled & mounted - Path: $folder")
+          else
+            menu_options+=("$matching_system" "Auto-enabled (mount failed) - Path: $folder")
+          fi
         fi
       fi
     fi
   done <<< "$discovered_folders"
+
+  # Show auto-enable summary if any systems were added
+  if [[ $auto_enabled_count -gt 0 ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - Systems Discovered" "<span foreground='$purple'><b>Found $auto_enabled_count new system(s) on your WebDAV server!</b></span>\n\nThey have been automatically enabled with auto-mount.\n\nThe systems will be mounted automatically on future RetroDECK startups."
+  fi
 
   # Also add any configured mounts that weren't discovered
   local configured_systems=$(remote_roms_get_mounts | jq -r 'keys[]')
@@ -1622,10 +1639,16 @@ configurator_remote_roms_manage_system_dialog() {
   # Handle the choice and refresh the dialog if needed
   case "$choice" in
     "Enable Remote ROMs")
-      # Add mount with automount enabled by default
-      remote_roms_add_mount "$system" "$system" ""
+      # Add mount with automount enabled by default (minimal user involvement)
+      remote_roms_add_mount "$system" "$system"
       remote_roms_set_mount_automount "$system" "true"
-      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nThe folder will be auto-mounted on startup."
+      
+      # Try to mount immediately
+      if remote_roms_mount_system "$system"; then
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured and mounted!</b></span>\n\nThe folder is now ready to use and will auto-mount on startup."
+      else
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nThe folder will be auto-mounted on startup."
+      fi
       refresh=true
       ;;
     "Mount")
