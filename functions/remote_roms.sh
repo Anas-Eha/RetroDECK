@@ -4,9 +4,11 @@
 # This file handles mounting remote WebDAV folders using rclone with VFS caching
 
 # Default rclone VFS settings
-readonly REMOTE_ROMS_DEFAULT_VFS_CACHE_MODE="full"
-readonly REMOTE_ROMS_DEFAULT_VFS_READ_AHEAD="8G"
-readonly REMOTE_ROMS_DEFAULT_VFS_CACHE_MAX_SIZE="20G"
+# Note: VFS cache is optional since we explicitly copy files locally
+# The cache only helps with directory listing and copy performance
+readonly REMOTE_ROMS_DEFAULT_VFS_CACHE_MODE="writes"
+readonly REMOTE_ROMS_DEFAULT_VFS_READ_AHEAD="0"
+readonly REMOTE_ROMS_DEFAULT_VFS_CACHE_MAX_SIZE="500M"
 
 # Debug log file for remote_roms operations
 readonly REMOTE_ROMS_DEBUG_LOG="$rd_xdg_config_logs_path/remote_roms_debug.log"
@@ -298,6 +300,18 @@ remote_roms_mount_system() {
   remote_roms_log_debug "mount_system: remote_visible=$remote_visible"
   remote_roms_log_debug "mount_system: roms_path=$roms_path"
 
+  # Check if FUSE is available
+  local fuse_status
+  fuse_status=$(remote_roms_check_fuse)
+  if [[ "$fuse_status" == "none" ]]; then
+    log e "FUSE not available - cannot mount $system"
+    remote_roms_log_debug "mount_system: ERROR - FUSE (fusermount3/fusermount) not found"
+    remote_roms_log_debug "mount_system: Running FUSE diagnosis..."
+    remote_roms_diagnose_fuse
+    return 1
+  fi
+  remote_roms_log_debug "mount_system: FUSE available: $fuse_status"
+
   # Check if already mounted
   if mountpoint -q "$remote_visible" 2>/dev/null; then
     log i "$system already mounted"
@@ -437,12 +451,16 @@ remote_roms_unmount_system() {
 
   if mountpoint -q "$mount_point" 2>/dev/null; then
     remote_roms_log_debug "unmount_system: Mount is active, attempting unmount..."
-    if fusermount -u "$mount_point" 2>/dev/null; then
+
+    # Try fusermount3 first, then fusermount, then umount
+    if command -v fusermount3 &> /dev/null && fusermount3 -u "$mount_point" 2>/dev/null; then
+      remote_roms_log_debug "unmount_system: fusermount3 -u succeeded"
+    elif command -v fusermount &> /dev/null && fusermount -u "$mount_point" 2>/dev/null; then
       remote_roms_log_debug "unmount_system: fusermount -u succeeded"
     elif umount "$mount_point" 2>/dev/null; then
       remote_roms_log_debug "unmount_system: umount succeeded"
     else
-      remote_roms_log_debug "unmount_system: WARNING - Both fusermount and umount failed"
+      remote_roms_log_debug "unmount_system: WARNING - All unmount methods failed"
     fi
     log i "Unmounted $system"
   else
@@ -608,182 +626,64 @@ remote_roms_check_rclone() {
   fi
 }
 
-remote_roms_set_global_enabled() {
-  # Enable/disable remote ROMs globally
-  jq --argjson e "$1" '.remote_roms.global_enabled = $e' "$rd_conf" > "$rd_conf.tmp" && mv "$rd_conf.tmp" "$rd_conf"
+remote_roms_check_fuse() {
+  # Check if FUSE is available (fusermount3 or fusermount)
+  # USAGE: remote_roms_check_fuse
+  # Returns: "fuse3", "fuse2", or "none"
+
+  remote_roms_log_debug "check_fuse: Checking for FUSE support"
+
+  if command -v fusermount3 &> /dev/null; then
+    remote_roms_log_debug "check_fuse: Found fusermount3 at: $(command -v fusermount3)"
+    echo "fuse3"
+    return 0
+  elif command -v fusermount &> /dev/null; then
+    remote_roms_log_debug "check_fuse: Found fusermount (fuse2) at: $(command -v fusermount)"
+    echo "fuse2"
+    return 0
+  else
+    remote_roms_log_debug "check_fuse: No fusermount found in PATH"
+    remote_roms_log_debug "check_fuse: PATH=$PATH"
+    echo "none"
+    return 1
+  fi
 }
 
-remote_roms_is_global_enabled() {
-  # Check if remote ROMs is enabled
-  jq -r '.remote_roms.global_enabled // false' "$rd_conf"
-}
+remote_roms_diagnose_fuse() {
+  # Diagnose FUSE issues
+  # USAGE: remote_roms_diagnose_fuse
 
-remote_roms_get_available_systems() {
-  # Get list of available ROM systems
-  if [[ -d "$roms_path" ]]; then
-    find "$roms_path" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort
-  fi
-}
+  local diag_log="$rd_xdg_config_logs_path/remote_roms_fuse_diagnosis.log"
 
-# ============================================
-# Diagnostic Functions
-# ============================================
-
-remote_roms_diagnose() {
-  # Comprehensive diagnostic function for troubleshooting
-  # USAGE: remote_roms_diagnose
-
-  local diag_log="$rd_xdg_config_logs_path/remote_roms_diagnosis.log"
-
-  echo "========================================" > "$diag_log"
-  echo "Remote ROMs Diagnostic Report" >> "$diag_log"
-  echo "Generated: $(date)" >> "$diag_log"
-  echo "========================================" >> "$diag_log"
+  echo "=== FUSE Diagnosis ===" > "$diag_log"
+  echo "Date: $(date)" >> "$diag_log"
   echo "" >> "$diag_log"
 
-  # Check rclone
-  echo "--- rclone Status ---" >> "$diag_log"
-  if command -v rclone &> /dev/null; then
-    echo "rclone path: $(command -v rclone)" >> "$diag_log"
-    echo "rclone version:" >> "$diag_log"
-    rclone version >> "$diag_log" 2>&1
-  else
-    echo "ERROR: rclone not found in PATH" >> "$diag_log"
-    echo "PATH=$PATH" >> "$diag_log"
-  fi
+  echo "--- FUSE Binaries ---" >> "$diag_log"
+  echo "fusermount3: $(command -v fusermount3 2>/dev/null || echo 'NOT FOUND')" >> "$diag_log"
+  echo "fusermount: $(command -v fusermount 2>/dev/null || echo 'NOT FOUND')" >> "$diag_log"
   echo "" >> "$diag_log"
 
-  # Check configuration
-  echo "--- Configuration ---" >> "$diag_log"
-  if [[ -f "$rd_conf" ]]; then
-    echo "Config file exists: $rd_conf" >> "$diag_log"
-    echo "Config permissions: $(stat -c %a "$rd_conf" 2>/dev/null || echo 'unknown')" >> "$diag_log"
-    echo "" >> "$diag_log"
-    echo "remote_roms section:" >> "$diag_log"
-    jq '.remote_roms' "$rd_conf" 2>/dev/null >> "$diag_log" || echo "ERROR: Failed to parse remote_roms config" >> "$diag_log"
-  else
-    echo "ERROR: Config file not found: $rd_conf" >> "$diag_log"
-  fi
+  echo "--- PATH ---" >> "$diag_log"
+  echo "$PATH" >> "$diag_log"
   echo "" >> "$diag_log"
 
-  # Check rclone config
-  echo "--- rclone Config ---" >> "$diag_log"
-  local rclone_conf="$XDG_CONFIG_HOME/rclone/rclone.conf"
-  if [[ -f "$rclone_conf" ]]; then
-    echo "rclone.conf exists: $rclone_conf" >> "$diag_log"
-    echo "rclone.conf permissions: $(stat -c %a "$rclone_conf" 2>/dev/null || echo 'unknown')" >> "$diag_log"
-    echo "rclone.conf contents (credentials redacted):" >> "$diag_log"
-    grep -v "^pass = " "$rclone_conf" 2>/dev/null >> "$diag_log" || echo "ERROR: Failed to read rclone.conf" >> "$diag_log"
-  else
-    echo "rclone.conf not found at: $rclone_conf" >> "$diag_log"
-  fi
+  echo "--- /usr/bin ---" >> "$diag_log"
+  ls -la /usr/bin/fuse* 2>/dev/null >> "$diag_log" || echo "No fuse binaries in /usr/bin" >> "$diag_log"
   echo "" >> "$diag_log"
 
-  # Check mounts
-  echo "--- Mount Status ---" >> "$diag_log"
-  echo "roms_path: $roms_path" >> "$diag_log"
-  if [[ -d "$roms_path" ]]; then
-    echo "roms_path exists: yes" >> "$diag_log"
-    echo "" >> "$diag_log"
-    echo "Checking for remote/ folders:" >> "$diag_log"
-    find "$roms_path" -maxdepth 2 -name "remote" -type d 2>/dev/null | while read remote_dir; do
-      echo "  Found: $remote_dir" >> "$diag_log"
-      if mountpoint -q "$remote_dir" 2>/dev/null; then
-        echo "    Status: MOUNTED" >> "$diag_log"
-        echo "    Contents:" >> "$diag_log"
-        ls -la "$remote_dir" 2>/dev/null | head -10 >> "$diag_log"
-      else
-        echo "    Status: NOT MOUNTED" >> "$diag_log"
-      fi
-    done
-  else
-    echo "ERROR: roms_path does not exist: $roms_path" >> "$diag_log"
-  fi
+  echo "--- /app/bin ---" >> "$diag_log"
+  ls -la /app/bin/fuse* 2>/dev/null >> "$diag_log" || echo "No fuse binaries in /app/bin" >> "$diag_log"
   echo "" >> "$diag_log"
 
-  # Check active mounts
-  echo "--- System Mounts ---" >> "$diag_log"
-  mount | grep -E "(rclone|fuse)" >> "$diag_log" 2>/dev/null || echo "No rclone/fuse mounts found" >> "$diag_log"
+  echo "--- Kernel FUSE Support ---" >> "$diag_log"
+  ls -la /dev/fuse 2>/dev/null >> "$diag_log" || echo "/dev/fuse not found" >> "$diag_log"
   echo "" >> "$diag_log"
 
-  # Check logs
-  echo "--- Recent Log Entries ---" >> "$diag_log"
-  if [[ -f "$rd_xdg_config_logs_path/remote_roms_debug.log" ]]; then
-    echo "remote_roms_debug.log (last 50 lines):" >> "$diag_log"
-    tail -50 "$rd_xdg_config_logs_path/remote_roms_debug.log" >> "$diag_log"
-  else
-    echo "remote_roms_debug.log not found" >> "$diag_log"
-  fi
+  echo "--- User Groups ---" >> "$diag_log"
+  groups >> "$diag_log"
   echo "" >> "$diag_log"
 
-  # Check rclone logs
-  echo "--- rclone Logs ---" >> "$diag_log"
-  find "$logs_path" -name "rclone-*.log" -type f 2>/dev/null | head -5 | while read logfile; do
-    echo "rclone log: $logfile" >> "$diag_log"
-    echo "Last 20 lines:" >> "$diag_log"
-    tail -20 "$logfile" >> "$diag_log" 2>&1
-    echo "" >> "$diag_log"
-  done
-
-  echo "========================================" >> "$diag_log"
-  echo "Diagnostic complete. Report saved to: $diag_log" >> "$diag_log"
-  echo "========================================" >> "$diag_log"
-
-  log i "Remote ROMs diagnostic report saved to: $diag_log"
+  echo "Diagnosis complete. See: $diag_log"
   echo "$diag_log"
-}
-
-remote_roms_log_effective_command() {
-  # Log the effective rclone command for a specific system
-  # USAGE: remote_roms_log_effective_command "$system"
-
-  local system="$1"
-  local log_file="$rd_xdg_config_logs_path/rclone_commands.log"
-
-  remote_roms_log_debug "log_effective_command: Logging effective command for $system"
-
-  # Get settings
-  local url=$(remote_roms_get_setting "webdav_url")
-  local cache_mode=$(remote_roms_get_setting "vfs_cache_mode")
-  local read_ahead=$(remote_roms_get_setting "vfs_read_ahead")
-  local cache_size=$(remote_roms_get_setting "vfs_cache_max_size")
-
-  local mount_config=$(jq --arg s "$system" '.remote_roms.mounts[$s] // empty' "$rd_conf")
-  local remote_path=$(echo "$mount_config" | jq -r '.remote_path // empty')
-  local custom_cache=$(echo "$mount_config" | jq -r '.cache_size // empty')
-
-  [[ -n "$custom_cache" ]] && cache_size="$custom_cache"
-
-  local system_path="$roms_path/$system"
-  local remote_visible="$roms_path/$system/remote"
-
-  {
-    echo ""
-    echo "=== EFFECTIVE RCLONE COMMAND FOR $system ==="
-    echo "Timestamp: $(date)"
-    echo ""
-    echo "WebDAV URL: $url"
-    echo "Remote Path: $remote_path"
-    echo "Local Mount Point: $remote_visible"
-    echo ""
-    echo "VFS Settings:"
-    echo "  Cache Mode: $cache_mode"
-    echo "  Read Ahead: $read_ahead"
-    echo "  Cache Max Size: $cache_size"
-    echo "  Cache Directory: $system_path/.vfs-cache"
-    echo ""
-    echo "Full Command:"
-    echo "rclone mount \"retrodeck-webdav:${remote_path}\" \"$remote_visible\" \\"
-    echo "  --vfs-cache-mode=\"$cache_mode\" \\"
-    echo "  --vfs-read-ahead=\"$read_ahead\" \\"
-    echo "  --vfs-cache-max-size=\"$cache_size\" \\"
-    echo "  --cache-dir=\"$system_path/.vfs-cache\" \\"
-    echo "  --allow-other --allow-non-empty --daemon \\"
-    echo "  --log-file=\"$logs_path/rclone-$system.log\""
-    echo ""
-    echo "=== END COMMAND ==="
-    echo ""
-  } >> "$log_file"
-
-  log i "Effective rclone command for $system logged to: $log_file"
 }
