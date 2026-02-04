@@ -93,13 +93,9 @@ remote_roms_test_connection() {
   remote_roms_log_debug "test_connection: User: ${user:-'(not set)'}"
   remote_roms_log_debug "test_connection: Password set: $([[ -n "$pass" ]] && echo 'yes' || echo 'no')"
 
-  remote_roms_log_debug "test_connection: URL: ${url:-'(not set)'}"
-  remote_roms_log_debug "test_connection: User: ${user:-'(not set)'}"
-  remote_roms_log_debug "test_connection: Password set: $([[ -n "$pass" ]] && echo 'yes' || echo 'no')"
 
   # Check for missing configuration
   if [[ -z "$url" || -z "$user" ]]; then
-    remote_roms_log_debug "test_connection: ERROR - Missing config (url or user empty)"
     remote_roms_log_debug "test_connection: ERROR - Missing config (url or user empty)"
     echo "missing_config"
     return 1
@@ -109,8 +105,6 @@ remote_roms_test_connection() {
   if ! command -v rclone &> /dev/null; then
     remote_roms_log_debug "test_connection: ERROR - rclone command not found in PATH"
     remote_roms_log_debug "test_connection: PATH=$PATH"
-    remote_roms_log_debug "test_connection: ERROR - rclone command not found in PATH"
-    remote_roms_log_debug "test_connection: PATH=$PATH"
     echo "rclone_not_found"
     return 1
   fi
@@ -118,8 +112,6 @@ remote_roms_test_connection() {
   remote_roms_log_debug "test_connection: rclone found at: $(command -v rclone)"
   remote_roms_log_debug "test_connection: rclone version: $(rclone version 2>/dev/null | head -1 || echo 'unknown')"
 
-  remote_roms_log_debug "test_connection: rclone found at: $(command -v rclone)"
-  remote_roms_log_debug "test_connection: rclone version: $(rclone version 2>/dev/null | head -1 || echo 'unknown')"
 
   # Create temporary rclone config
   local rclone_config
@@ -129,7 +121,6 @@ remote_roms_test_connection() {
 
   remote_roms_log_debug "test_connection: Created temp config: $rclone_config"
 
-  remote_roms_log_debug "test_connection: Created temp config: $rclone_config"
 
   cat > "$rclone_config" << EOF
 [webdav-test]
@@ -142,7 +133,6 @@ EOF
 
   remote_roms_log_debug "test_connection: Testing connection to: $url"
 
-  remote_roms_log_debug "test_connection: Testing connection to: $url"
 
   # Test connection with timeout
   local test_result
@@ -151,32 +141,20 @@ EOF
   local rclone_exit_code=$?
 
   if [[ $rclone_exit_code -eq 0 ]]; then
-  local rclone_output
-  rclone_output=$(RCLONE_CONFIG="$rclone_config" rclone ls "webdav-test:/" --max-depth 1 --contimeout 10s --timeout 10s 2>&1)
-  local rclone_exit_code=$?
-
-  if [[ $rclone_exit_code -eq 0 ]]; then
     test_result="connected"
-    remote_roms_log_debug "test_connection: Connection SUCCESS"
     remote_roms_log_debug "test_connection: Connection SUCCESS"
   else
     test_result="connection_failed"
     remote_roms_log_debug "test_connection: Connection FAILED (exit code: $rclone_exit_code)"
     remote_roms_log_debug "test_connection: rclone error output: $rclone_output"
-    remote_roms_log_debug "test_connection: Connection FAILED (exit code: $rclone_exit_code)"
-    remote_roms_log_debug "test_connection: rclone error output: $rclone_output"
   fi
-
-  # Cleanup
 
   # Cleanup
   rm -f "$rclone_config"
   remote_roms_log_debug "test_connection: Cleaned up temp config"
 
   remote_roms_log_debug "test_connection: ====== END CONNECTION TEST (result: $test_result) ======"
-  remote_roms_log_debug "test_connection: Cleaned up temp config"
 
-  remote_roms_log_debug "test_connection: ====== END CONNECTION TEST (result: $test_result) ======"
 
   echo "$test_result"
   [[ "$test_result" == "connected" ]]
@@ -199,10 +177,6 @@ remote_roms_add_mount() {
   remote_roms_log_debug "add_mount: remote_path=$remote_path"
   remote_roms_log_debug "add_mount: cache_size=${cache_size:-'(default)'}"
 
-  remote_roms_log_debug "add_mount: ====== ADDING MOUNT ======"
-  remote_roms_log_debug "add_mount: system=$system"
-  remote_roms_log_debug "add_mount: remote_path=$remote_path"
-  remote_roms_log_debug "add_mount: cache_size=${cache_size:-'(default)'}"
 
   local mount_obj=$(jq -n \
     --arg system "$system" \
@@ -213,14 +187,11 @@ remote_roms_add_mount() {
       "remote_path": $remote_path,
       "enabled": true,
       "automount": false,
-      "automount": false,
       "cache_size": (if $cache_size == "" then null else $cache_size end)
     }')
 
   jq --arg system "$system" --argjson obj "$mount_obj" '.remote_roms.mounts[$system] = $obj' "$rd_conf" > "$rd_conf.tmp" && mv "$rd_conf.tmp" "$rd_conf"
   log i "Added mount for $system"
-  remote_roms_log_debug "add_mount: Mount added successfully"
-  remote_roms_log_debug "add_mount: ====== END ADD MOUNT ======"
   remote_roms_log_debug "add_mount: Mount added successfully"
   remote_roms_log_debug "add_mount: ====== END ADD MOUNT ======"
 }
@@ -259,20 +230,7 @@ remote_roms_set_mount_automount() {
   remote_roms_log_debug "set_mount_automount: Auto-mount setting updated"
 }
 
-remote_roms_set_mount_automount() {
-  # Enable/disable auto-mount for a system
-  # USAGE: remote_roms_set_mount_automount "$system" "true|false"
 
-  local system="$1"
-  local automount="$2"
-
-  remote_roms_log_debug "set_mount_automount: Setting automount for $system to $automount"
-
-  jq --arg s "$system" --argjson a "$automount" '.remote_roms.mounts[$s].automount = $a' "$rd_conf" > "$rd_conf.tmp" && mv "$rd_conf.tmp" "$rd_conf"
-
-  log i "Auto-mount for $system set to $automount"
-  remote_roms_log_debug "set_mount_automount: Auto-mount setting updated"
-}
 
 remote_roms_get_mounts() {
   # Get all mount configurations
@@ -292,7 +250,6 @@ remote_roms_generate_rclone_config() {
 
   remote_roms_log_debug "generate_rclone_config: Starting config generation"
 
-  remote_roms_log_debug "generate_rclone_config: Starting config generation"
 
   url=$(remote_roms_get_setting "webdav_url")
   user=$(remote_roms_get_setting "webdav_user")
@@ -302,23 +259,9 @@ remote_roms_generate_rclone_config() {
   remote_roms_log_debug "generate_rclone_config: User configured: ${user:-'(empty)'}"
   remote_roms_log_debug "generate_rclone_config: Password is set: $([[ -n "$pass" ]] && echo 'yes' || echo 'no')"
 
-  remote_roms_log_debug "generate_rclone_config: URL configured: ${url:-'(empty)'}"
-  remote_roms_log_debug "generate_rclone_config: User configured: ${user:-'(empty)'}"
-  remote_roms_log_debug "generate_rclone_config: Password is set: $([[ -n "$pass" ]] && echo 'yes' || echo 'no')"
 
   rclone_dir="$XDG_CONFIG_HOME/rclone"
   mkdir -p "$rclone_dir"
-  remote_roms_log_debug "generate_rclone_config: rclone config dir: $rclone_dir"
-
-  # Check if rclone is available
-  if ! command -v rclone &> /dev/null; then
-    remote_roms_log_debug "generate_rclone_config: ERROR - rclone command not found!"
-    log e "rclone not found in PATH. Cannot generate config."
-    return 1
-  fi
-
-  remote_roms_log_debug "generate_rclone_config: rclone binary found at: $(command -v rclone)"
-  remote_roms_log_debug "generate_rclone_config: rclone version: $(rclone version 2>/dev/null | head -1 || echo 'unknown')"
   remote_roms_log_debug "generate_rclone_config: rclone config dir: $rclone_dir"
 
   # Check if rclone is available
@@ -344,8 +287,6 @@ EOF
 
   # Secure the config file (contains credentials)
   chmod 600 "$rclone_dir/rclone.conf"
-  remote_roms_log_debug "generate_rclone_config: Config file created at: $rclone_dir/rclone.conf"
-  remote_roms_log_debug "generate_rclone_config: Config file permissions: $(stat -c %a "$rclone_dir/rclone.conf" 2>/dev/null || echo 'unknown')"
   remote_roms_log_debug "generate_rclone_config: Config file created at: $rclone_dir/rclone.conf"
   remote_roms_log_debug "generate_rclone_config: Config file permissions: $(stat -c %a "$rclone_dir/rclone.conf" 2>/dev/null || echo 'unknown')"
 }
@@ -387,20 +328,16 @@ remote_roms_mount_system() {
   if mountpoint -q "$remote_visible" 2>/dev/null; then
     log i "$system already mounted"
     remote_roms_log_debug "mount_system: Already mounted, returning success"
-    remote_roms_log_debug "mount_system: Already mounted, returning success"
     return 0
   fi
-  remote_roms_log_debug "mount_system: Not currently mounted, proceeding"
   remote_roms_log_debug "mount_system: Not currently mounted, proceeding"
 
   mount_config=$(jq --arg s "$system" '.remote_roms.mounts[$s] // empty' "$rd_conf")
   remote_roms_log_debug "mount_system: mount_config from JSON: ${mount_config:-'(empty)'})"
 
-  remote_roms_log_debug "mount_system: mount_config from JSON: ${mount_config:-'(empty)'})"
 
   if [[ -z "$mount_config" ]]; then
     log e "No mount config for $system"
-    remote_roms_log_debug "mount_system: ERROR - No mount config found in rd_conf"
     remote_roms_log_debug "mount_system: ERROR - No mount config found in rd_conf"
     return 1
   fi
@@ -408,24 +345,14 @@ remote_roms_mount_system() {
   enabled=$(echo "$mount_config" | jq -r '.enabled')
   remote_roms_log_debug "mount_system: enabled=$enabled"
   [[ "$enabled" != "true" ]] && { remote_roms_log_debug "mount_system: Mount not enabled, skipping"; return 0; }
-  remote_roms_log_debug "mount_system: enabled=$enabled"
-  [[ "$enabled" != "true" ]] && { remote_roms_log_debug "mount_system: Mount not enabled, skipping"; return 0; }
 
   remote_path=$(echo "$mount_config" | jq -r '.remote_path')
   custom_cache=$(echo "$mount_config" | jq -r '.cache_size // empty')
   remote_roms_log_debug "mount_system: remote_path=$remote_path"
   remote_roms_log_debug "mount_system: custom_cache=$custom_cache"
-  remote_roms_log_debug "mount_system: remote_path=$remote_path"
-  remote_roms_log_debug "mount_system: custom_cache=$custom_cache"
 
   remote_roms_log_debug "mount_system: Generating rclone config..."
-  remote_roms_log_debug "mount_system: Generating rclone config..."
   remote_roms_generate_rclone_config
-  local config_result=$?
-  if [[ $config_result -ne 0 ]]; then
-    remote_roms_log_debug "mount_system: ERROR - Failed to generate rclone config"
-    return 1
-  fi
   local config_result=$?
   if [[ $config_result -ne 0 ]]; then
     remote_roms_log_debug "mount_system: ERROR - Failed to generate rclone config"
@@ -439,18 +366,14 @@ remote_roms_mount_system() {
 
   remote_roms_log_debug "mount_system: VFS settings - cache_mode=$cache_mode, read_ahead=$read_ahead, cache_size=$cache_size"
 
-  remote_roms_log_debug "mount_system: VFS settings - cache_mode=$cache_mode, read_ahead=$read_ahead, cache_size=$cache_size"
 
   # Use custom cache size if set
   [[ -n "$custom_cache" ]] && cache_size="$custom_cache"
-  [[ -n "$custom_cache" ]] && remote_roms_log_debug "mount_system: Using custom cache_size=$cache_size"
   [[ -n "$custom_cache" ]] && remote_roms_log_debug "mount_system: Using custom cache_size=$cache_size"
 
   # Create directories
   mkdir -p "$system_path"
   mkdir -p "$remote_visible"
-  remote_roms_log_debug "mount_system: Created directories - system_path exists: $([[ -d "$system_path" ]] && echo 'yes' || echo 'no')"
-  remote_roms_log_debug "mount_system: Created directories - remote_visible exists: $([[ -d "$remote_visible" ]] && echo 'yes' || echo 'no')"
   remote_roms_log_debug "mount_system: Created directories - system_path exists: $([[ -d "$system_path" ]] && echo 'yes' || echo 'no')"
   remote_roms_log_debug "mount_system: Created directories - remote_visible exists: $([[ -d "$remote_visible" ]] && echo 'yes' || echo 'no')"
 
@@ -501,48 +424,14 @@ EOF
   echo "    --log-file=\"$logs_path/rclone-$system.log\"" >> "$rd_xdg_config_logs_path/rclone_commands.log"
   echo "" >> "$rd_xdg_config_logs_path/rclone_commands.log"
 
-  # Build and log the rclone mount command
-  local rclone_cmd="rclone mount"
-  local rclone_remote="retrodeck-webdav:${remote_path}"
-  local rclone_mount_point="$remote_visible"
-
-  remote_roms_log_debug "mount_system: ====== EFFECTIVE RCLONE COMMAND ======"
-  remote_roms_log_debug "mount_system: Command: $rclone_cmd"
-  remote_roms_log_debug "mount_system: Remote: $rclone_remote"
-  remote_roms_log_debug "mount_system: Mount Point: $rclone_mount_point"
-  remote_roms_log_debug "mount_system: Full command line:"
-  remote_roms_log_debug "mount_system:   $rclone_cmd \"$rclone_remote\" \"$rclone_mount_point\" \\"
-  remote_roms_log_debug "mount_system:     --vfs-cache-mode=\"$cache_mode\" \\"
-  remote_roms_log_debug "mount_system:     --vfs-read-ahead=\"$read_ahead\" \\"
-  remote_roms_log_debug "mount_system:     --vfs-cache-max-size=\"$cache_size\" \\"
-  remote_roms_log_debug "mount_system:     --cache-dir=\"$system_path/.vfs-cache\" \\"
-  remote_roms_log_debug "mount_system:     --allow-other --allow-non-empty --daemon \\"
-  remote_roms_log_debug "mount_system:     --log-file=\"$logs_path/rclone-$system.log\""
-  remote_roms_log_debug "mount_system: ====== END RCLONE COMMAND ======"
-
-  # Also write to a dedicated file for easy debugging
-  echo "$(date +[%Y-%m-%d\ %H:%M:%S]) RCLONE MOUNT COMMAND for $system:" >> "$rd_xdg_config_logs_path/rclone_commands.log"
-  echo "  $rclone_cmd \"$rclone_remote\" \"$rclone_mount_point\" \\" >> "$rd_xdg_config_logs_path/rclone_commands.log"
-  echo "    --vfs-cache-mode=\"$cache_mode\" \\" >> "$rd_xdg_config_logs_path/rclone_commands.log"
-  echo "    --vfs-read-ahead=\"$read_ahead\" \\" >> "$rd_xdg_config_logs_path/rclone_commands.log"
-  echo "    --vfs-cache-max-size=\"$cache_size\" \\" >> "$rd_xdg_config_logs_path/rclone_commands.log"
-  echo "    --cache-dir=\"$system_path/.vfs-cache\" \\" >> "$rd_xdg_config_logs_path/rclone_commands.log"
-  echo "    --allow-other --allow-non-empty --daemon \\" >> "$rd_xdg_config_logs_path/rclone_commands.log"
-  echo "    --log-file=\"$logs_path/rclone-$system.log\"" >> "$rd_xdg_config_logs_path/rclone_commands.log"
-  echo "" >> "$rd_xdg_config_logs_path/rclone_commands.log"
-
   # Mount remote to visible remote/ folder
-  remote_roms_log_debug "mount_system: Executing rclone mount..."
-  if rclone mount "$rclone_remote" "$rclone_mount_point" \
   remote_roms_log_debug "mount_system: Executing rclone mount..."
   if rclone mount "$rclone_remote" "$rclone_mount_point" \
     --vfs-cache-mode="$cache_mode" \
     --vfs-read-ahead="$read_ahead" \
     --vfs-cache-max-size="$cache_size" \
     --cache-dir="$system_path/.vfs-cache" \
-    --cache-dir="$system_path/.vfs-cache" \
     --allow-other --allow-non-empty --daemon \
-    --log-file="$logs_path/rclone-$system.log"; then
     --log-file="$logs_path/rclone-$system.log"; then
 
     log i "Mounted $system remote to $remote_visible"
@@ -554,20 +443,9 @@ EOF
       remote_roms_log_debug "mount_system: WARNING - mountpoint command reports not mounted (may be timing issue)"
     fi
     remote_roms_log_debug "mount_system: ====== END MOUNT FOR $system (SUCCESS) ======"
-    remote_roms_log_debug "mount_system: Mount successful"
-    remote_roms_log_debug "mount_system: Verifying mount with mountpoint command..."
-    if mountpoint -q "$remote_visible" 2>/dev/null; then
-      remote_roms_log_debug "mount_system: Verified - mountpoint is active"
-    else
-      remote_roms_log_debug "mount_system: WARNING - mountpoint command reports not mounted (may be timing issue)"
-    fi
-    remote_roms_log_debug "mount_system: ====== END MOUNT FOR $system (SUCCESS) ======"
     return 0
   else
     log e "Failed to mount $system"
-    remote_roms_log_debug "mount_system: ERROR - rclone mount command failed with exit code $?"
-    remote_roms_log_debug "mount_system: Check rclone log at: $logs_path/rclone-$system.log"
-    remote_roms_log_debug "mount_system: ====== END MOUNT FOR $system (FAILED) ======"
     remote_roms_log_debug "mount_system: ERROR - rclone mount command failed with exit code $?"
     remote_roms_log_debug "mount_system: Check rclone log at: $logs_path/rclone-$system.log"
     remote_roms_log_debug "mount_system: ====== END MOUNT FOR $system (FAILED) ======"
@@ -585,8 +463,6 @@ remote_roms_unmount_system() {
   remote_roms_log_debug "unmount_system: ====== UNMOUNT $system ======"
   remote_roms_log_debug "unmount_system: mount_point=$mount_point"
 
-  remote_roms_log_debug "unmount_system: ====== UNMOUNT $system ======"
-  remote_roms_log_debug "unmount_system: mount_point=$mount_point"
 
   if mountpoint -q "$mount_point" 2>/dev/null; then
     remote_roms_log_debug "unmount_system: Mount is active, attempting unmount..."
@@ -604,10 +480,7 @@ remote_roms_unmount_system() {
     log i "Unmounted $system"
   else
     remote_roms_log_debug "unmount_system: Mount was not active (nothing to unmount)"
-  else
-    remote_roms_log_debug "unmount_system: Mount was not active (nothing to unmount)"
   fi
-  remote_roms_log_debug "unmount_system: ====== END UNMOUNT ======"
   remote_roms_log_debug "unmount_system: ====== END UNMOUNT ======"
 }
 
@@ -615,24 +488,15 @@ remote_roms_mount_all() {
   # Mount all enabled systems
   log i "Mounting all enabled remote ROM systems"
   remote_roms_log_debug "mount_all: ====== START MOUNT ALL ======"
-  remote_roms_log_debug "mount_all: ====== START MOUNT ALL ======"
 
   local mounts=$(remote_roms_get_mounts)
   local count=0
 
   remote_roms_log_debug "mount_all: Found mounts config: $mounts"
 
-  remote_roms_log_debug "mount_all: Found mounts config: $mounts"
 
   while IFS= read -r system; do
     if [[ -n "$system" ]]; then
-      remote_roms_log_debug "mount_all: Attempting to mount: $system"
-      if remote_roms_mount_system "$system"; then
-        ((count++))
-        remote_roms_log_debug "mount_all: $system mounted successfully"
-      else
-        remote_roms_log_debug "mount_all: $system mount failed"
-      fi
       remote_roms_log_debug "mount_all: Attempting to mount: $system"
       if remote_roms_mount_system "$system"; then
         ((count++))
@@ -644,8 +508,6 @@ remote_roms_mount_all() {
   done < <(echo "$mounts" | jq -r 'to_entries[] | select(.value.enabled == true) | .key')
 
   log i "Mounted $count systems"
-  remote_roms_log_debug "mount_all: Total systems mounted: $count"
-  remote_roms_log_debug "mount_all: ====== END MOUNT ALL ======"
   remote_roms_log_debug "mount_all: Total systems mounted: $count"
   remote_roms_log_debug "mount_all: ====== END MOUNT ALL ======"
 }
@@ -668,12 +530,41 @@ remote_roms_is_mounted() {
   local system="$1"
   local mount_point="$roms_path/$system/remote"
   if mountpoint -q "$mount_point" 2>/dev/null; then
-  local mount_point="$roms_path/$system/remote"
-  if mountpoint -q "$mount_point" 2>/dev/null; then
     echo "true"
   else
     echo "false"
   fi
+}
+
+remote_roms_get_available_systems() {
+  # Get list of available RetroDECK systems for remote ROMs
+  # Returns: Space-separated list of system folder names (gba snes ps2 etc.)
+  # This is used by the discovery dialog to match remote folders
+
+  # Check if roms_path is set and exists
+  if [[ -z "$roms_path" || ! -d "$roms_path" ]]; then
+    # Return default common systems if roms_path not available
+    echo "3do amiga arcade atari2600 atari5200 atari7800 atarilynx c64 coleco dreamcast famicom fds gamegear gb gba gbc genesis intellivision jaguar mastersystem megacd megadrive n64 nds neogeo neogeocd nes ngp ngpc odyssey2 pcengine pcenginecd pico8 pokemini ps2 ps3 psp psx saturn scummvm sega32x segacd sfc sg1000 snes switch tg16 tg16cd tic80 vb vectrex vic20 virtualboy wonderswan wonderswancolor x68000 xbox zxspectrum"
+    return 0
+  fi
+
+  # Get actual system folders from roms directory
+  local systems=""
+  for dir in "$roms_path"/*/; do
+    if [[ -d "$dir" ]]; then
+      local sysname=$(basename "$dir")
+      # Skip special directories
+      [[ "$sysname" == "remote" || "$sysname" == "downloaded" ]] && continue
+      systems="$systems $sysname"
+    fi
+  done
+
+  # If no systems found in roms folder, return defaults
+  if [[ -z "$systems" ]]; then
+    systems="3do amiga arcade atari2600 atari5200 atari7800 atarilynx c64 coleco dreamcast famicom fds gamegear gb gba gbc genesis intellivision jaguar mastersystem megacd megadrive n64 nds neogeo neogeocd nes ngp ngpc odyssey2 pcengine pcenginecd pico8 pokemini ps2 ps3 psp psx saturn scummvm sega32x segacd sfc sg1000 snes switch tg16 tg16cd tic80 vb vectrex vic20 virtualboy wonderswan wonderswancolor x68000 xbox zxspectrum"
+  fi
+
+  echo "$systems"
 }
 
 # ============================================
@@ -682,6 +573,7 @@ remote_roms_is_mounted() {
 
 remote_roms_download_rom() {
   # Download a ROM from remote to local if not already present
+  # Uses atomic download (temp file + move) to prevent corruption
   # USAGE: local_path=$(remote_roms_download_rom "$system" "$rom_name")
   # Returns: path to local file (either existing or newly downloaded)
 
@@ -697,37 +589,13 @@ remote_roms_download_rom() {
   remote_roms_log_debug "download_rom: remote_path=$remote_path"
   remote_roms_log_debug "download_rom: roms_path=$roms_path"
 
-  remote_roms_log_debug "download_rom: ====== START DOWNLOAD ======"
-  remote_roms_log_debug "download_rom: system=$system"
-  remote_roms_log_debug "download_rom: rom_name=$rom_name"
-  remote_roms_log_debug "download_rom: local_path=$local_path"
-  remote_roms_log_debug "download_rom: remote_path=$remote_path"
-  remote_roms_log_debug "download_rom: roms_path=$roms_path"
 
   # If already local, return immediately
   if [[ -f "$local_path" ]]; then
     remote_roms_log_debug "download_rom: File already exists locally, returning immediately"
     remote_roms_log_debug "download_rom: Local file size: $(stat -c%s "$local_path" 2>/dev/null || echo 'unknown') bytes"
-    remote_roms_log_debug "download_rom: File already exists locally, returning immediately"
-    remote_roms_log_debug "download_rom: Local file size: $(stat -c%s "$local_path" 2>/dev/null || echo 'unknown') bytes"
     echo "$local_path"
     return 0
-  fi
-  remote_roms_log_debug "download_rom: File not found locally, checking remote..."
-
-  # Check if remote mount exists
-  if [[ ! -d "$roms_path/$system/remote" ]]; then
-    remote_roms_log_debug "download_rom: ERROR - Remote mount directory does not exist: $roms_path/$system/remote"
-    remote_roms_log_debug "download_rom: The mount may not be active for system: $system"
-    return 1
-  fi
-
-  # Check if mount is active
-  if ! mountpoint -q "$roms_path/$system/remote" 2>/dev/null; then
-    remote_roms_log_debug "download_rom: WARNING - Mountpoint check failed for: $roms_path/$system/remote"
-    remote_roms_log_debug "download_rom: The mount may not be active"
-  else
-    remote_roms_log_debug "download_rom: Mountpoint is active"
   fi
   remote_roms_log_debug "download_rom: File not found locally, checking remote..."
 
@@ -751,20 +619,14 @@ remote_roms_download_rom() {
     log i "Downloading $rom_name from remote..."
     remote_roms_log_debug "download_rom: Remote file found, starting copy..."
     remote_roms_log_debug "download_rom: Remote file size (if stat works): $(stat -c%s "$remote_path" 2>/dev/null || echo 'stat failed - mount may not be fully ready')"
-    remote_roms_log_debug "download_rom: Remote file found, starting copy..."
-    remote_roms_log_debug "download_rom: Remote file size (if stat works): $(stat -c%s "$remote_path" 2>/dev/null || echo 'stat failed - mount may not be fully ready')"
 
-    # Copy entire file (cp from rclone mount downloads full file)
-    remote_roms_log_debug "download_rom: Executing: cp \"$remote_path\" \"$local_path\""
-    remote_roms_log_debug "download_rom: Executing: cp \"$remote_path\" \"$local_path\""
-    if cp "$remote_path" "$local_path"; then
-      remote_roms_log_debug "download_rom: Copy completed successfully"
-      if [[ -f "$local_path" ]]; then
-        remote_roms_log_debug "download_rom: Local file size after copy: $(stat -c%s "$local_path" 2>/dev/null || echo 'unknown') bytes"
-      else
-        remote_roms_log_debug "download_rom: ERROR - Local file not found after successful cp"
-      fi
-      remote_roms_log_debug "download_rom: Copy completed successfully"
+    # Copy entire file using atomic download (temp file + move)
+    # This prevents partial files if download is interrupted
+    local temp_file="$local_path.tmp.$$"
+    remote_roms_log_debug "download_rom: Executing atomic download: cp \"$remote_path\" \"$temp_file\" && mv \"$temp_file\" \"$local_path\""
+    if cp "$remote_path" "$temp_file" && mv "$temp_file" "$local_path"; then
+      remote_roms_log_debug "download_rom: Atomic download completed successfully"
+      rm -f "$temp_file" 2>/dev/null  # Clean up temp file if somehow still exists
       if [[ -f "$local_path" ]]; then
         remote_roms_log_debug "download_rom: Local file size after copy: $(stat -c%s "$local_path" 2>/dev/null || echo 'unknown') bytes"
       else
@@ -773,25 +635,18 @@ remote_roms_download_rom() {
       log i "Downloaded $rom_name successfully"
       echo "$local_path"
       remote_roms_log_debug "download_rom: ====== END DOWNLOAD (SUCCESS) ======"
-      remote_roms_log_debug "download_rom: ====== END DOWNLOAD (SUCCESS) ======"
       return 0
     else
       log e "Failed to download $rom_name"
       remote_roms_log_debug "download_rom: ERROR - cp command failed with exit code $?"
-      remote_roms_log_debug "download_rom: ====== END DOWNLOAD (FAILED) ======"
-      remote_roms_log_debug "download_rom: ERROR - cp command failed with exit code $?"
+      # Clean up temp file on failure
+      rm -f "$temp_file" 2>/dev/null
       remote_roms_log_debug "download_rom: ====== END DOWNLOAD (FAILED) ======"
       return 1
     fi
   fi
 
   # File not found in either location
-  remote_roms_log_debug "download_rom: ERROR - File not found at remote path: $remote_path"
-  remote_roms_log_debug "download_rom: Listing remote directory contents:"
-  ls -la "$roms_path/$system/remote/" 2>/dev/null | head -20 | while read line; do
-    remote_roms_log_debug "download_rom:   $line"
-  done || remote_roms_log_debug "download_rom:   (directory listing failed)"
-  remote_roms_log_debug "download_rom: ====== END DOWNLOAD (NOT FOUND) ======"
   remote_roms_log_debug "download_rom: ERROR - File not found at remote path: $remote_path"
   remote_roms_log_debug "download_rom: Listing remote directory contents:"
   ls -la "$roms_path/$system/remote/" 2>/dev/null | head -20 | while read line; do
@@ -817,20 +672,8 @@ remote_roms_check_rclone() {
     local version
     version=$(rclone version 2>/dev/null | head -1 || echo 'unknown')
     remote_roms_log_debug "check_rclone: rclone version: $version"
-  remote_roms_log_debug "check_rclone: Checking if rclone is available..."
-
-  local rclone_path
-  rclone_path=$(command -v rclone 2>/dev/null)
-
-  if [[ -n "$rclone_path" ]]; then
-    remote_roms_log_debug "check_rclone: rclone found at: $rclone_path"
-    local version
-    version=$(rclone version 2>/dev/null | head -1 || echo 'unknown')
-    remote_roms_log_debug "check_rclone: rclone version: $version"
     echo "true"
   else
-    remote_roms_log_debug "check_rclone: rclone NOT found in PATH"
-    remote_roms_log_debug "check_rclone: PATH=$PATH"
     remote_roms_log_debug "check_rclone: rclone NOT found in PATH"
     remote_roms_log_debug "check_rclone: PATH=$PATH"
     echo "false"

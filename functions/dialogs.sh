@@ -1257,6 +1257,56 @@ configurator_iconset_toggle_dialog() {
   configurator_global_presets_and_settings_dialog
 }
 
+configurator_remote_dialog() {
+  # Main dialog for Remote Connection settings
+  # USAGE: configurator_remote_dialog
+
+  log i "Opening Remote Connection dialog"
+
+  # Initialize config if needed
+  remote_roms_init_config
+
+  local global_enabled=$(remote_roms_is_global_enabled)
+  local status_text="Disabled"
+  [[ "$global_enabled" == "true" ]] && status_text="Enabled"
+
+  local menu_options=(
+    "Connection Settings" "Configure WebDAV server URL, username and password"
+    "Manage Mounts" "Configure remote folders (auto-discover, mount/unmount)"
+    "Test Connection" "Test the WebDAV connection"
+  )
+
+  choice=$(rd_zenity --list \
+    --title "RetroDECK Configurator - Remote Connection" \
+    --cancel-label="Back" --ok-label="Select" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --width=1000 --height=600 \
+    --column="Option" --column="Description" \
+    "${menu_options[@]}")
+
+  local rc=$?
+
+  if [[ $rc -ne 0 || -z "$choice" ]]; then
+    configurator_welcome_dialog
+    return
+  fi
+
+  case "$choice" in
+    "Connection Settings")
+      configurator_remote_roms_connection_dialog
+      ;;
+    "Manage Mounts")
+      configurator_remote_roms_mounts_dialog
+      ;;
+    "Test Connection")
+      configurator_remote_roms_test_dialog
+      ;;
+    *)
+      configurator_remote_dialog
+      ;;
+  esac
+}
+
 configurator_remote_roms_connection_dialog() {
   # Dialog for configuring WebDAV connection settings
   # USAGE: configurator_remote_roms_connection_dialog
@@ -1277,14 +1327,15 @@ configurator_remote_roms_connection_dialog() {
   local rc=$?
 
   if [[ $rc -ne 0 || -z "$form_result" ]]; then
-    configurator_data_management_dialog
+    configurator_remote_dialog
     return
   fi
 
-  # Parse form results (pipe-separated)
-  local url=$(echo "$form_result" | cut -d'|' -f1)
-  local user=$(echo "$form_result" | cut -d'|' -f2)
-  local pass=$(echo "$form_result" | cut -d'|' -f3)
+  # Parse form results (pipe-separated from zenity forms)
+  # NOTE: This uses the last two fields as user/pass to handle | in password
+  local url=$(echo "$form_result" | awk -F'|' '{print $1}')
+  local user=$(echo "$form_result" | awk -F'|' '{print $(NF-1)}')
+  local pass=$(echo "$form_result" | awk -F'|' '{print $NF}')
 
   if [[ -z "$url" || -z "$user" ]]; then
     configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>URL and Username are required.</b></span>\n\nPlease enter both values."
@@ -1295,7 +1346,7 @@ configurator_remote_roms_connection_dialog() {
   remote_roms_save_webdav_config "$url" "$user" "$pass"
 
   configurator_generic_dialog "RetroDECK Configurator - Settings Saved" "<span foreground='$purple'><b>WebDAV connection settings saved.</b></span>\n\nYou can now test the connection or configure mounts."
-  configurator_data_management_dialog
+  configurator_remote_dialog
 }
 
 configurator_remote_roms_mounts_dialog() {
@@ -1318,7 +1369,7 @@ configurator_remote_roms_discover_dialog() {
   local url=$(remote_roms_get_setting "webdav_url")
   if [[ -z "$url" ]]; then
     configurator_generic_dialog "RetroDECK Configurator - No Connection" "<span foreground='$purple'><b>No WebDAV connection configured.</b></span>\n\nPlease set up Connection Settings first."
-    configurator_data_management_dialog
+    configurator_remote_dialog
     return
   fi
 
@@ -1370,15 +1421,22 @@ $sub_folders"
     echo "100"
     echo "# Discovery complete"
 
-    # Save discovered folders to temp file
-    echo "$discovered_folders" > /tmp/remote_roms_discovered
+    # Save discovered folders to temp file using mktemp for security
+    local temp_discover_file=$(mktemp /tmp/remote_roms_discovered.XXXXXX)
+    echo "$discovered_folders" > "$temp_discover_file"
+    echo "$temp_discover_file" > /tmp/remote_roms_discover_file_path
   ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
     --title "RetroDECK - Discovering Remote Folders" \
     --text="Scanning WebDAV server for available folders..." \
     --width=400 --height=100
 
-  local discovered_folders=$(cat /tmp/remote_roms_discovered 2>/dev/null)
-  rm -f /tmp/remote_roms_discovered
+  local temp_discover_file=$(cat /tmp/remote_roms_discover_file_path 2>/dev/null)
+  local discovered_folders=""
+  if [[ -f "$temp_discover_file" ]]; then
+    discovered_folders=$(cat "$temp_discover_file" 2>/dev/null)
+    rm -f "$temp_discover_file"
+  fi
+  rm -f /tmp/remote_roms_discover_file_path
 
   log d "Discovery found folders: $discovered_folders"
 
@@ -1436,7 +1494,7 @@ $sub_folders"
 
   if [[ ${#menu_options[@]} -eq 0 ]]; then
     configurator_generic_dialog "RetroDECK Configurator - No Folders" "<span foreground='$purple'><b>No matching folders found on WebDAV server.</b></span>\n\nMake sure your server has folders that match RetroDECK system names (gba, snes, ps2, etc.)"
-    configurator_data_management_dialog
+    configurator_remote_dialog
     return
   fi
 
@@ -1451,7 +1509,7 @@ $sub_folders"
   local rc=$?
 
   if [[ $rc -ne 0 || -z "$choice" ]]; then
-    configurator_data_management_dialog
+    configurator_remote_dialog
     return
   fi
 
@@ -1494,15 +1552,20 @@ configurator_remote_roms_test_dialog() {
       ;;
   esac
 
-  configurator_data_management_dialog
+  configurator_remote_dialog
 }
 
 configurator_remote_roms_manage_system_dialog() {
   # Simplified management dialog for a specific system
   # USAGE: configurator_remote_roms_manage_system_dialog "$system"
+  # NOTE: Uses while-loop pattern to avoid infinite recursion on refresh
 
   local system="$1"
-  log i "Opening manage dialog for $system"
+  local refresh=true
+
+  while [[ "$refresh" == "true" ]]; do
+    refresh=false  # Will be set to true to refresh the dialog
+    log i "Opening manage dialog for $system"
 
   # Check current status
   local existing_config=$(remote_roms_get_mounts | jq --arg s "$system" -r '.[$s] // empty')
@@ -1556,12 +1619,14 @@ configurator_remote_roms_manage_system_dialog() {
     return
   fi
 
+  # Handle the choice and refresh the dialog if needed
   case "$choice" in
     "Enable Remote ROMs")
       # Add mount with automount enabled by default
       remote_roms_add_mount "$system" "$system" ""
       remote_roms_set_mount_automount "$system" "true"
       configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nThe folder will be auto-mounted on startup."
+      refresh=true
       ;;
     "Mount")
       if remote_roms_mount_system "$system"; then
@@ -1569,18 +1634,22 @@ configurator_remote_roms_manage_system_dialog() {
       else
         configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>Failed to mount $system.</b></span>\n\nCheck the logs for details."
       fi
+      refresh=true
       ;;
     "Unmount")
       remote_roms_unmount_system "$system"
       configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system unmounted.</b></span>"
+      refresh=true
       ;;
     "Enable Auto-mount")
       remote_roms_set_mount_automount "$system" "true"
       configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-mount enabled for $system.</b></span>\n\nThis folder will be mounted automatically on startup."
+      refresh=true
       ;;
     "Disable Auto-mount")
       remote_roms_set_mount_automount "$system" "false"
       configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-mount disabled for $system.</b></span>\n\nYou'll need to mount this folder manually."
+      refresh=true
       ;;
     "Remove Configuration")
       rd_zenity --question \
@@ -1591,9 +1660,9 @@ configurator_remote_roms_manage_system_dialog() {
         remote_roms_remove_mount "$system"
         configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configuration removed.</b></span>"
       fi
+      refresh=true
       ;;
   esac
 
-  # Refresh the dialog
-  configurator_remote_roms_manage_system_dialog "$system"
+  done  # End of while loop - dialog refreshes if refresh=true
 }

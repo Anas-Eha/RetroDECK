@@ -23,8 +23,10 @@ source /app/libexec/global.sh
 #         - Universal Dynamic Input Textures: Primehack
 #         - PortMaster: Hide
 #     - Open Component (Behind one-time power user warning dialog)
-#       - Dynamically generated list of emulators from open_component --list and --getdesc (features.json)
-#     - Reset Component
+#       - Dynamically generated list of emulators from open_component --list and --getdesc (features.json)    - Remote Connection
+      - Connection Settings
+      - Manage Mounts
+      - Test Connection#     - Reset Component
 #       - Reset Emulator or Engine
 #         - Reset RetroArch
 #         - Reset Cemu
@@ -73,9 +75,6 @@ source /app/libexec/global.sh
 #       - Backup RetroDECK
 #       - ROMS Folder: Clean Empty Systems
 #       - ROMS Folder: Rebuild Systems
-#       - Remote ROMs: Connection Settings
-#       - Remote ROMs: Manage Mounts
-#       - Remote ROMs: Test Connection
 #       - Move: All of RetroDECK
 #       - Move: ROMs folder
 #       - Move: BIOS folder
@@ -105,7 +104,8 @@ configurator_welcome_dialog() {
   welcome_menu_options=(
     "About RetroDECK" "View patch notes, credits, and other project information."
     "Data Management" "Move, clean empty or rebuild RetroDECK directories."
-    "Open Component" "Manually launch and configure individual components. Advanced Users Only." 
+    "Open Component" "Manually launch and configure individual components. Advanced Users Only."
+    "Remote Connection" "Configure WebDAV remote ROMs connection and mounts."
     "Reset Components" "Reset a specific component or restore all RetroDECK defaults."
     "Settings" "Adjust core RetroDECK: Presets, Visuals, Tweaks and Logins."
     "Steam Tools" "Synchronize ES-DE Favorites or add RetroDECK to Steam."
@@ -161,6 +161,11 @@ configurator_welcome_dialog() {
   "Data Management" )
     log i "Configurator: opening \"$choice\" menu"
     configurator_data_management_dialog
+  ;;
+
+  "Remote Connection" )
+    log i "Configurator: opening \"$choice\" menu"
+    configurator_remote_dialog
   ;;
 
   "" )
