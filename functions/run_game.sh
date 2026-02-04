@@ -80,6 +80,9 @@ run_game() {
 
     # Handle Remote ROMs: Download from WebDAV if accessing from remote/ folder
     if [[ "$game" == */remote/* ]]; then
+        log d "REMOTE_ROMS: Remote ROM path detected: $game"
+        log d "REMOTE_ROMS: roms_path variable is: $roms_path"
+
         local remote_rom_path="$game"
         local system_name
         system_name=$(echo "$game" | grep -oP '(?<=roms/)[^/]+')
@@ -88,12 +91,23 @@ run_game() {
         local local_rom_path="$roms_path/$system_name/$rom_name"
         local temp_download_path="$roms_path/$system_name/.${rom_name}.part"
 
+        log d "REMOTE_ROMS: Parsed system_name: $system_name"
+        log d "REMOTE_ROMS: Parsed rom_name: $rom_name"
+        log d "REMOTE_ROMS: local_rom_path: $local_rom_path"
+        log d "REMOTE_ROMS: temp_download_path: $temp_download_path"
+        log d "REMOTE_ROMS: Checking if file exists at local path: $local_rom_path"
+
         # Check if already downloaded locally
         if [[ ! -f "$local_rom_path" ]]; then
             log i "Remote ROM detected: $rom_name - downloading to local storage..."
+            log d "REMOTE_ROMS: Local file not found, starting download process"
 
             # Clean up any partial download
             rm -f "$temp_download_path"
+
+            log d "REMOTE_ROMS: Starting download from: $remote_rom_path"
+            log d "REMOTE_ROMS: Target temp path: $temp_download_path"
+            log d "REMOTE_ROMS: Checking if remote file exists: $(ls -la "$remote_rom_path" 2>&1 || echo 'File not accessible')"
 
             # Show download progress dialog and download atomically
             (
@@ -101,26 +115,33 @@ run_game() {
                 echo "# Downloading $rom_name from remote storage..."
 
                 # Copy to temp file first (atomic download)
+                log d "REMOTE_ROMS: Executing cp command: cp \"$remote_rom_path\" \"$temp_download_path\""
                 if cp "$remote_rom_path" "$temp_download_path"; then
+                    log d "REMOTE_ROMS: cp command succeeded"
                     # Verify file was downloaded completely
                     if [[ -s "$temp_download_path" ]]; then
+                        log d "REMOTE_ROMS: Temp file exists and is non-empty: $(ls -la "$temp_download_path" 2>&1)"
                         # Atomic move to final location
                         if mv "$temp_download_path" "$local_rom_path"; then
+                            log d "REMOTE_ROMS: mv command succeeded, file at: $local_rom_path"
                             echo "100"
                             echo "# Download complete!"
                         else
+                            log e "REMOTE_ROMS: mv command failed"
                             echo "100"
                             echo "# Failed to finalize download!"
                             rm -f "$temp_download_path"
                             exit 1
                         fi
                     else
+                        log e "REMOTE_ROMS: Downloaded file is empty or missing"
                         echo "100"
                         echo "# Downloaded file is empty!"
                         rm -f "$temp_download_path"
                         exit 1
                     fi
                 else
+                    log e "REMOTE_ROMS: cp command failed - exit code: $?"
                     echo "100"
                     echo "# Download failed!"
                     rm -f "$temp_download_path"
