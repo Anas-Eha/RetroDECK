@@ -73,6 +73,9 @@ source /app/libexec/global.sh
 #       - Backup RetroDECK
 #       - ROMS Folder: Clean Empty Systems
 #       - ROMS Folder: Rebuild Systems
+#       - Remote ROMs: Connection Settings
+#       - Remote ROMs: Manage Mounts
+#       - Remote ROMs: Test Connection
 #       - Move: All of RetroDECK
 #       - Move: ROMs folder
 #       - Move: BIOS folder

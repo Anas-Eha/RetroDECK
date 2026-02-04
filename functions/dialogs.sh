@@ -1257,60 +1257,6 @@ configurator_iconset_toggle_dialog() {
   configurator_global_presets_and_settings_dialog
 }
 
-# ============================================
-# Remote ROMs Folder Dialog Functions
-# ============================================
-
-configurator_remote_roms_dialog() {
-  # Main dialog for Remote ROMs folder configuration
-  # USAGE: configurator_remote_roms_dialog
-
-  log i "Opening Remote ROMs dialog"
-
-  # Initialize config if needed
-  remote_roms_init_config
-
-  local global_enabled=$(remote_roms_is_global_enabled)
-  local status_text="Disabled"
-  [[ "$global_enabled" == "true" ]] && status_text="Enabled"
-
-  local menu_options=(
-    "Connection Settings" "Configure WebDAV server URL, username and password"
-    "Manage Mounts" "Configure remote folders (auto-discover, mount/unmount)"
-    "Test Connection" "Test the WebDAV connection"
-  )
-
-  choice=$(rd_zenity --list \
-    --title "RetroDECK Configurator - Remote ROMs Folder" \
-    --cancel-label="Back" --ok-label="Select" \
-    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
-    --width=1000 --height=600 \
-    --column="Option" --column="Description" \
-    "${menu_options[@]}")
-
-  local rc=$?
-
-  if [[ $rc -ne 0 || -z "$choice" ]]; then
-    configurator_data_management_dialog
-    return
-  fi
-
-  case "$choice" in
-    "Connection Settings")
-      configurator_remote_roms_connection_dialog
-      ;;
-    "Manage Mounts")
-      configurator_remote_roms_mounts_dialog
-      ;;
-    "Test Connection")
-      configurator_remote_roms_test_dialog
-      ;;
-    *)
-      configurator_remote_roms_dialog
-      ;;
-  esac
-}
-
 configurator_remote_roms_connection_dialog() {
   # Dialog for configuring WebDAV connection settings
   # USAGE: configurator_remote_roms_connection_dialog
@@ -1331,7 +1277,7 @@ configurator_remote_roms_connection_dialog() {
   local rc=$?
 
   if [[ $rc -ne 0 || -z "$form_result" ]]; then
-    configurator_remote_roms_dialog
+    configurator_data_management_dialog
     return
   fi
 
@@ -1349,7 +1295,7 @@ configurator_remote_roms_connection_dialog() {
   remote_roms_save_webdav_config "$url" "$user" "$pass"
 
   configurator_generic_dialog "RetroDECK Configurator - Settings Saved" "<span foreground='$purple'><b>WebDAV connection settings saved.</b></span>\n\nYou can now test the connection or configure mounts."
-  configurator_remote_roms_dialog
+  configurator_data_management_dialog
 }
 
 configurator_remote_roms_mounts_dialog() {
@@ -1372,7 +1318,7 @@ configurator_remote_roms_discover_dialog() {
   local url=$(remote_roms_get_setting "webdav_url")
   if [[ -z "$url" ]]; then
     configurator_generic_dialog "RetroDECK Configurator - No Connection" "<span foreground='$purple'><b>No WebDAV connection configured.</b></span>\n\nPlease set up Connection Settings first."
-    configurator_remote_roms_dialog
+    configurator_data_management_dialog
     return
   fi
 
@@ -1387,20 +1333,38 @@ configurator_remote_roms_discover_dialog() {
     local pass=$(remote_roms_get_setting "webdav_pass")
     local obscured_pass=$(rclone obscure "$pass" 2>/dev/null || echo "$pass")
 
-    cat > "$rclone_config" << EOF
-[webdav-discover]
-type = webdav
-url = $url
-vendor = other
-user = $user
-pass = $obscured_pass
-EOF
+    echo "[webdav-discover]" > "$rclone_config"
+    echo "type = webdav" >> "$rclone_config"
+    echo "url = $url" >> "$rclone_config"
+    echo "vendor = other" >> "$rclone_config"
+    echo "user = $user" >> "$rclone_config"
+    echo "pass = $obscured_pass" >> "$rclone_config"
+
+    echo "30"
+    echo "# Scanning root folder..."
+
+    # Try to list remote root and common subfolders
+    local all_folders=""
+
+    # Scan root
+    local root_folders=$(RCLONE_CONFIG="$rclone_config" rclone lsf "webdav-discover:/" --max-depth 1 --dirs-only 2>/dev/null | sed 's|/$||')
+    all_folders="$root_folders"
 
     echo "50"
-    echo "# Scanning for folders..."
+    echo "# Scanning common subfolders..."
 
-    # Try to list remote root
-    local discovered_folders=$(RCLONE_CONFIG="$rclone_config" rclone lsf "webdav-discover:/" --max-depth 1 --dirs-only 2>/dev/null | sed 's|/$||' | sort)
+    # Also scan common subfolders like /roms, /games, /library
+    for subfolder in roms games library; do
+      if echo "$root_folders" | grep -q "^${subfolder}$"; then
+        local sub_folders=$(RCLONE_CONFIG="$rclone_config" rclone lsf "webdav-discover:/$subfolder" --max-depth 1 --dirs-only 2>/dev/null | sed 's|/$||' | sed "s|^|$subfolder/|")
+        all_folders="$all_folders
+$sub_folders"
+      fi
+    done
+
+    # Remove duplicates and sort
+    local discovered_folders=$(echo "$all_folders" | sort -u)
+
     rm -f "$rclone_config"
 
     echo "100"
@@ -1416,18 +1380,26 @@ EOF
   local discovered_folders=$(cat /tmp/remote_roms_discovered 2>/dev/null)
   rm -f /tmp/remote_roms_discovered
 
+  log d "Discovery found folders: $discovered_folders"
+
   # Build the management list
   local menu_options=()
   local available_systems=$(remote_roms_get_available_systems)
+  local found_count=0
 
   # Add discovered folders that match available systems
   while IFS= read -r folder; do
     if [[ -n "$folder" ]]; then
-      # Check if this folder matches a known system
+      log d "Checking folder: $folder"
+
+      # Check if this folder matches a known system (either directly or in subfolder)
       local matching_system=""
+      local folder_basename=$(basename "$folder")
+
       for sys in $available_systems; do
-        if [[ "$folder" == "$sys" ]]; then
+        if [[ "$folder" == "$sys" ]] || [[ "$folder_basename" == "$sys" ]]; then
           matching_system="$sys"
+          ((found_count++))
           break
         fi
       done
@@ -1441,9 +1413,9 @@ EOF
           local status="Configured"
           [[ "$is_mounted" == "true" ]] && status="Mounted"
           [[ "$automount" == "true" ]] && status="${status} (Auto)"
-          menu_options+=("$matching_system" "$status - Click to manage")
+          menu_options+=("$matching_system" "$status - Path: $folder")
         else
-          menu_options+=("$matching_system" "Not configured - Click to set up")
+          menu_options+=("$matching_system" "Not configured - Path: $folder")
         fi
       fi
     fi
@@ -1464,7 +1436,7 @@ EOF
 
   if [[ ${#menu_options[@]} -eq 0 ]]; then
     configurator_generic_dialog "RetroDECK Configurator - No Folders" "<span foreground='$purple'><b>No matching folders found on WebDAV server.</b></span>\n\nMake sure your server has folders that match RetroDECK system names (gba, snes, ps2, etc.)"
-    configurator_remote_roms_dialog
+    configurator_data_management_dialog
     return
   fi
 
@@ -1479,7 +1451,7 @@ EOF
   local rc=$?
 
   if [[ $rc -ne 0 || -z "$choice" ]]; then
-    configurator_remote_roms_dialog
+    configurator_data_management_dialog
     return
   fi
 
@@ -1522,7 +1494,7 @@ configurator_remote_roms_test_dialog() {
       ;;
   esac
 
-  configurator_remote_roms_dialog
+  configurator_data_management_dialog
 }
 
 configurator_remote_roms_manage_system_dialog() {

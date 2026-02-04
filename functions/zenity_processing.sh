@@ -156,10 +156,6 @@ build_zenity_menu_array() {
     done < <(api_get_all_preset_names | jq -r '.[].preset_name')
   fi
 
-  if [[ "$menu_name" == "data_management" ]]; then # Add Remote ROMs entry to Data Management
-    temp_bash_array+=("Remote: ROMs Folder" "Mount remote WebDAV folders using rclone" "configurator_remote_roms_dialog")
-  fi
-
   while read -r obj; do # Iterate through all returned menu objects
     local name=$(jq -r '.name' <<< "$obj")
     local desc=$(jq -r '.description' <<< "$obj")

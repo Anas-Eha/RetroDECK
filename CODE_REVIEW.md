@@ -169,6 +169,92 @@ No automated tests for:
 ✅ README.txt helps users understand the structure
 ✅ No external dependencies beyond rclone (already in manifest)
 
+## Dialog Functions Review (functions/dialogs.sh)
+
+### Issues in `configurator_remote_roms_discover_dialog()`
+
+**1. Predictable Temp File (Security)**
+- Location: Line ~1380
+- Issue: `/tmp/remote_roms_discovered` uses predictable filename
+- Risk: Race condition if multiple RetroDECK instances run simultaneously
+- Fix: Use `mktemp` with proper suffix: `$(mktemp /tmp/remote_roms_discovered.XXXXXX)`
+
+**2. Silent Failures in Discovery**
+- Location: rclone commands with `2>/dev/null`
+- Issue: All rclone errors suppressed, user sees "0 folders found" with no explanation
+- Fix: Capture stderr to log file and show meaningful error messages
+
+**3. Unquoted Variable in grep**
+- Location: `echo "$root_folders" | grep -q "^${subfolder}$"`
+- Issue: If root_folders is empty or has special characters, grep may fail unexpectedly
+- Fix: Use `[[ "$root_folders" =~ (^| )${subfolder}($| ) ]]` or proper quoting
+
+### Issues in `configurator_remote_roms_manage_system_dialog()`
+
+**4. Invalid Return Path (CRITICAL)**
+- Location: Line ~1555 (cancel handler)
+- Issue: `configurator_remote_roms_discover_dialog` - this function may not exist in current flow
+- Fix: Change to `configurator_data_management_dialog`
+
+**5. Infinite Recursion Risk**
+- Location: End of function (line ~1598)
+- Issue: Function calls itself to "refresh" - stack grows with each action
+- Risk: Stack overflow after many operations
+- Fix: Use a while loop instead of recursion:
+```bash
+configurator_remote_roms_manage_system_dialog() {
+  local system="$1"
+  while true; do
+    # ... build menu and show dialog ...
+    if [[ $rc -ne 0 || -z "$choice" ]]; then
+      configurator_data_management_dialog
+      return
+    fi
+    # ... handle choice ...
+    # Remove the recursive call at end, loop will refresh
+  done
+}
+```
+
+**6. Missing Error Handling for Mount Operations**
+- Location: "Mount" case
+- Issue: `remote_roms_mount_system` return code checked, but no logging of WHY it failed
+- Fix: Log the specific error before showing generic dialog
+
+### Issues in `configurator_remote_roms_connection_dialog()`
+
+**7. Form Parsing Fragility**
+- Location: `cut -d'|' -f1` etc.
+- Issue: If user enters `|` character in URL or password, parsing breaks
+- Fix: Use different delimiter or validate input contains no `|`
+
+**8. Password Obscuration Not Validated**
+- Location: `rclone obscure "$pass"`
+- Issue: If rclone fails (not installed), password stored in plaintext
+- Fix: Check if obscure succeeded before saving
+
+### Issues in `configurator_remote_roms_test_dialog()`
+
+**9. Temp File Not Cleaned on Interrupt**
+- Location: `/tmp/remote_roms_test_result`
+- Issue: If user kills dialog mid-test, temp file remains
+- Fix: Use `trap` or mktemp with cleanup
+
+### General Issues
+
+**10. Inconsistent Navigation Pattern**
+- Some functions return to `configurator_data_management_dialog`
+- Others try to return to non-existent intermediate dialogs
+- Need consistent "Back" behavior throughout
+
+**11. Missing `local` Declarations**
+- Variables like `choice`, `rc`, `menu_options` not declared local
+- Risk: Variable leakage between functions
+
+**12. No Validation of remote_roms_get_available_systems**
+- If this returns empty, discovery silently finds nothing
+- Should warn user if no systems are configured
+
 ## Conclusion
 
 The implementation is **functionally correct** and ready for testing. The critical duplicate code has been fixed. Address P0 and P1 items before production release.

@@ -33,12 +33,8 @@ remote_roms_init_config() {
   remote_roms_log_debug "init_config: Starting initialization check"
   remote_roms_log_debug "init_config: rd_conf path: $rd_conf"
 
-  remote_roms_log_debug "init_config: Starting initialization check"
-  remote_roms_log_debug "init_config: rd_conf path: $rd_conf"
-
   if ! jq -e '.remote_roms' "$rd_conf" > /dev/null 2>&1; then
     log i "Creating remote_roms configuration"
-    remote_roms_log_debug "init_config: remote_roms section not found, creating default config"
     remote_roms_log_debug "init_config: remote_roms section not found, creating default config"
     local default_config='{
       "webdav_url": "",
@@ -51,9 +47,6 @@ remote_roms_init_config() {
       "global_enabled": false
     }'
     jq --argjson config "$default_config" '.remote_roms = $config' "$rd_conf" > "$rd_conf.tmp" && mv "$rd_conf.tmp" "$rd_conf"
-    remote_roms_log_debug "init_config: Default config created successfully"
-  else
-    remote_roms_log_debug "init_config: remote_roms section already exists"
     remote_roms_log_debug "init_config: Default config created successfully"
   else
     remote_roms_log_debug "init_config: remote_roms section already exists"
@@ -89,8 +82,6 @@ remote_roms_test_connection() {
   # Test WebDAV connection
   # USAGE: result=$(remote_roms_test_connection)
   # Returns: "connected", "missing_config", "rclone_not_found", or "connection_failed"
-
-  remote_roms_log_debug "test_connection: ====== START CONNECTION TEST ======"
 
   remote_roms_log_debug "test_connection: ====== START CONNECTION TEST ======"
 
