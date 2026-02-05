@@ -8,6 +8,14 @@ readonly REMOTE_ROMS_DEFAULT_VFS_CACHE_MODE="writes"
 readonly REMOTE_ROMS_DEFAULT_VFS_READ_AHEAD="0"
 readonly REMOTE_ROMS_DEFAULT_VFS_CACHE_MAX_SIZE="50M"
 
+# Internal helper: Debug logging function
+remote_roms_log_debug() {
+  # Only log if remote ROMs debug logging is enabled
+  if [[ "${REMOTE_ROMS_DEBUG:-0}" == "1" ]]; then
+    log d "$1"
+  fi
+}
+
 # Internal helper: Write rclone config file
 _remote_roms_write_rclone_config() {
   local config_file="$1"

@@ -33,7 +33,7 @@ add-extensions:
   # Mounts are sandboxed - only visible inside RetroDECK
   org.freedesktop.Platform.FUSE:
     directory: lib/fuse
-    version: '24.08'
+    version: '25.08'
     add-ld-path: lib
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -59,11 +59,8 @@ finish-args:
   # Devices: All device access (e.g., /dev/*, used for various inputs)
   - --device=all
 
-  # Devices: FUSE device access (required for rclone mount)
-  - --device=/dev/fuse
-
-  # FUSE: Shared memory required for FUSE operations
-  - --filesystem=/dev/shm
+  # FUSE: Shared memory device access (required for rclone mount)
+  - --device=shm
 
   # FUSE: Required capability for mount operations (SYS_ADMIN)
   - --allow=devel
@@ -204,7 +201,23 @@ modules:
   - name: rclone
     buildsystem: simple
     build-commands:
+      # 1. Install rclone binary
       - install -Dm755 rclone "${FLATPAK_DEST}/bin/rclone"
+      
+      # 2. Create wrapper scripts for fusermount3/fusermount
+      # The FUSE extension provides binaries in /app/lib/fuse/bin/
+      # These wrappers ensure rclone can find them in PATH
+      - |
+        cat > "${FLATPAK_DEST}/bin/fusermount3" << 'EOF'
+        #!/bin/sh
+        # Wrapper to FUSE extension's fusermount3 binary
+        exec /app/lib/fuse/bin/fusermount3 "$@"
+        EOF
+        chmod +x "${FLATPAK_DEST}/bin/fusermount3"
+      
+      # 3. Create fusermount symlink for compatibility with older tools
+      - ln -sf fusermount3 "${FLATPAK_DEST}/bin/fusermount"
+      
     sources:
       - type: archive
         url: https://github.com/rclone/rclone/releases/download/v1.69.1/rclone-v1.69.1-linux-amd64.zip
