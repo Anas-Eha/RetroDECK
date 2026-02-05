@@ -67,6 +67,17 @@ remote_roms_set_setting() {
   jq --arg val "$2" ".remote_roms.$1 = \$val" "$rd_conf" > "$rd_conf.tmp" && mv "$rd_conf.tmp" "$rd_conf"
 }
 
+remote_roms_is_global_enabled() {
+  # Check if remote ROMs global feature is enabled
+  # USAGE: if [[ $(remote_roms_is_global_enabled) == "true" ]]; then ...
+  local enabled=$(remote_roms_get_setting "global_enabled")
+  if [[ "$enabled" == "true" ]]; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
 # ============================================
 # WebDAV Configuration
 # ============================================
@@ -278,6 +289,31 @@ remote_roms_mount_system() {
   local rclone_remote="retrodeck-webdav:${remote_path}"
   local rclone_mount_point="$remote_visible"
 
+  # Ensure we use the fusermount3 wrapper that calls host via flatpak-spawn
+  # The bundled fusermount3 in the sandbox requires D-Bus which isn't available
+  local fusermount_wrapper="${XDG_CONFIG_HOME}/rclone/fusermount3"
+  if [[ -x "$fusermount_wrapper" ]]; then
+    remote_roms_log_debug "mount_system: Using fusermount3 wrapper at $fusermount_wrapper"
+  else
+    # Create wrapper script
+    mkdir -p "${XDG_CONFIG_HOME}/rclone"
+    cat > "$fusermount_wrapper" << 'WRAPPER_EOF'
+#!/bin/sh
+# Fusermount3 wrapper - calls host via flatpak-spawn
+if [ -z "$_FUSE_COMMFD" ]; then
+    FD_ARGS=
+else
+    FD_ARGS="--env=_FUSE_COMMFD=${_FUSE_COMMFD} --forward-fd=${_FUSE_COMMFD}"
+fi
+if [ -e /proc/self/fd/3 ] && [ 3 != "$_FUSE_COMMFD" ]; then
+    FD_ARGS="$FD_ARGS --forward-fd=3"
+fi
+exec flatpak-spawn --host --forward-fd=1 --forward-fd=2 $FD_ARGS fusermount3 "$@"
+WRAPPER_EOF
+    chmod +x "$fusermount_wrapper"
+    remote_roms_log_debug "mount_system: Created fusermount3 wrapper at $fusermount_wrapper"
+  fi
+
   # Build rclone command arguments array
   local rclone_args=(
     --vfs-cache-mode="$cache_mode"
@@ -288,7 +324,12 @@ remote_roms_mount_system() {
     --allow-non-empty
     --daemon
     --log-file="$logs_path/rclone-$system.log"
+    --fuse-flag=auto_unmount
+    --fuse-flag=fsname=retrodeck-$system
   )
+
+  # Set PATH to prioritize our wrapper
+  export PATH="${XDG_CONFIG_HOME}/rclone:$PATH"
 
   # Log command
   remote_roms_log_debug "mount_system: rclone mount $rclone_remote -> $rclone_mount_point (cache: $cache_mode, read_ahead: $read_ahead, max_size: $cache_size)"
