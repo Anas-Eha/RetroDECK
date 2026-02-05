@@ -347,6 +347,7 @@ remote_roms_mount_system() {
 
   remote_roms_log_debug "mount_system: $system mounted successfully"
   return 0
+}
 
 remote_roms_unmount_system() {
   # Unmount a specific system

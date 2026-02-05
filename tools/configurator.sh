@@ -24,9 +24,6 @@ source /app/libexec/global.sh
 #         - PortMaster: Hide
 #     - Open Component (Behind one-time power user warning dialog)
 #       - Dynamically generated list of emulators from open_component --list and --getdesc (features.json)    - Remote Connection
-      - Connection Settings
-      - Manage Mounts
-      - Test Connection#     - Reset Component
 #       - Reset Emulator or Engine
 #         - Reset RetroArch
 #         - Reset Cemu
