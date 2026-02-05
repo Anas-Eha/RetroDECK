@@ -59,6 +59,15 @@ finish-args:
   # Devices: All device access (e.g., /dev/*, used for various inputs)
   - --device=all
 
+  # Devices: FUSE device access (required for rclone mount)
+  - --device=/dev/fuse
+
+  # FUSE: Shared memory required for FUSE operations
+  - --filesystem=/dev/shm
+
+  # FUSE: Required capability for mount operations (SYS_ADMIN)
+  - --allow=devel
+
   # Devices: Bluetooth access (used for various inputs)
   - --allow=bluetooth
 
