@@ -42,6 +42,7 @@
     "portmaster_reload_esde": "true",
     "portmaster_show": "true",
     "remote_roms_automount": "true",
+    "remote_roms_quickresume": "false",
     "iconset": "lahrs-main"
   },
   "presets": {}

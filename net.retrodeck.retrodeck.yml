@@ -29,11 +29,11 @@ add-extensions:
     autodelete: false
     add-ld-path: lib
 
-  # FUSE support for rclone mount (required for WebDAV remote ROMs)
+  # FUSE support for rclone mount (WebDAV remote ROMs)
+  # Mounts are sandboxed - only visible inside RetroDECK
   org.freedesktop.Platform.FUSE:
     directory: lib/fuse
-    version: '2.10'
-    autodelete: true
+    version: '24.08'
     add-ld-path: lib
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -81,6 +81,9 @@ finish-args:
   # GStreamer integration
   - --env=GST_PLUGIN_SYSTEM_PATH=/app/lib32/gstreamer-1.0:/app/lib/gstreamer-1.0:/usr/lib/i386-linux-gnu/gstreamer-1.0:/usr/lib/x86_64-linux-gnu/gstreamer-1.0
 
+  # FUSE/rclone: Add FUSE extension to PATH for fusermount3
+  - --env=PATH=/app/bin:/app/lib/fuse/bin:/usr/bin
+
   # Gamescope integration
   - --filesystem=xdg-run/gamescope-0:ro
   - --env=LD_LIBRARY_PATH=/usr/lib/extensions/vulkan/gamescope/lib
@@ -88,7 +91,7 @@ finish-args:
   # Multi‑arch support (32‑bit libs on 64‑bit)
   - --allow=multiarch
 
-  # Network 
+  # Network
   - --share=network
 
   # Environmental Paths: MangoHud, JRE (Java based Systems), Gamescope and OBS (Disabled for now) 
@@ -186,61 +189,17 @@ modules:
 
   # -------------------------------------------------------------------------
   # rclone - manage files on cloud storage (required for WebDAV remote ROMs)
+  # Uses FUSE extension for mount support (sandboxed - mounts only visible inside RetroDECK)
   # -------------------------------------------------------------------------
 
   - name: rclone
     buildsystem: simple
     build-commands:
       - install -Dm755 rclone "${FLATPAK_DEST}/bin/rclone"
-      - |
-        # Create fusermount3 wrapper for FUSE mount support
-        if [ ! -f "${FLATPAK_DEST}/bin/fusermount3" ]; then
-          cat > "${FLATPAK_DEST}/bin/fusermount3" << 'EOF'
-        #!/bin/sh
-        # Wrapper for fusermount3 - tries to find the real binary
-        if [ -x "/usr/bin/fusermount3" ]; then
-          exec /usr/bin/fusermount3 "$@"
-        elif [ -x "/app/bin/fusermount" ]; then
-          exec /app/bin/fusermount "$@"
-        elif [ -x "/usr/bin/fusermount" ]; then
-          exec /usr/bin/fusermount "$@"
-        else
-          echo "Error: fusermount not found" >&2
-          exit 1
-        fi
-        EOF
-          chmod +x "${FLATPAK_DEST}/bin/fusermount3"
-        fi
     sources:
       - type: archive
         url: https://github.com/rclone/rclone/releases/download/v1.69.1/rclone-v1.69.1-linux-amd64.zip
         sha256: 231841f8d8029ae6cfca932b601b3b50d0e2c3c2cb9da3166293f1c3eae7d79c
-
-  # -------------------------------------------------------------------------
-  # libfuse - Filesystem in Userspace (required for rclone mount)
-  # -------------------------------------------------------------------------
-
-  - name: libfuse
-    buildsystem: meson
-    config-opts:
-      - --prefix=/app
-      - -Dexamples=false
-      - -Dtests=false
-      - -Duseroot=false
-    sources:
-      - type: archive
-        url: https://github.com/libfuse/libfuse/releases/download/fuse-3.16.2/fuse-3.16.2.tar.gz
-        sha256: f797055d9296b275e981f5f62d4e32e089614fc253d1ef2985851025b8a0ce87
-    post-install:
-      # Enable user_allow_other for FUSE mounts (required for rclone --allow-other)
-      - mkdir -p /app/etc
-      - echo "user_allow_other" > /app/etc/fuse.conf
-    cleanup:
-      - /include
-      - /lib/pkgconfig
-      - /lib/*.la
-      - /share/doc
-      - /share/man
 
   # -------------------------------------------------------------------------
   # rsync - utility for transferring and synchronizing files.

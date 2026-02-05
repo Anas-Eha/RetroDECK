@@ -78,6 +78,31 @@ run_game() {
         exit 1
     fi
 
+    # Handle 999RepairRemote.zip: Repair all mounts when triggered
+    if [[ "$(basename "$game")" == "999RepairRemote.zip" ]]; then
+        log i "REMOTE_ROMS: Repair file detected: $game"
+        
+        # Repair all remote mounts
+        log i "REMOTE_ROMS: Repairing all remote mounts..."
+        local repaired_count=$(remote_roms_repair_all_mounts)
+        
+        # Show success dialog
+        if [[ "$repaired_count" -gt 0 ]]; then
+            rd_zenity --icon-name=net.retrodeck.retrodeck --info --no-wrap \
+                --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+                --title "RetroDECK - Quick Resume Repair" \
+                --text="<span foreground='$purple'><b>Quick Resume Repair Complete!</b></span>\n\nRepaired <b>$repaired_count</b> remote mount(s).\n\nYou can now launch your games normally."
+        else
+            rd_zenity --icon-name=net.retrodeck.retrodeck --info --no-wrap \
+                --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+                --title "RetroDECK - Quick Resume Repair" \
+                --text="<span foreground='$purple'><b>All Mounts Healthy!</b></span>\n\nAll remote mounts are already working correctly.\n\nYou can now launch your games normally."
+        fi
+        
+        # Exit after repair - don't try to "launch" the QuickResume file
+        exit 0
+    fi
+
     # Handle Remote ROMs: Download from WebDAV if accessing from remote/ folder
     if [[ "$game" == */remote/* ]]; then
         log d "REMOTE_ROMS: Remote ROM path detected: $game"

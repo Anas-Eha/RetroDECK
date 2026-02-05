@@ -1273,6 +1273,7 @@ configurator_remote_dialog() {
   local menu_options=(
     "Connection Settings" "Configure WebDAV server URL, username and password"
     "Manage Mounts" "Configure remote folders (auto-discover, mount/unmount)"
+    "Repair All Mounts" "Fix stale mounts after Quick Resume or network issues"
     "Test Connection" "Test the WebDAV connection"
   )
 
@@ -1297,6 +1298,9 @@ configurator_remote_dialog() {
       ;;
     "Manage Mounts")
       configurator_remote_roms_mounts_dialog
+      ;;
+    "Repair All Mounts")
+      configurator_remote_roms_repair_dialog
       ;;
     "Test Connection")
       configurator_remote_roms_test_dialog
@@ -1361,6 +1365,7 @@ configurator_remote_roms_mounts_dialog() {
 
 configurator_remote_roms_discover_dialog() {
   # Auto-discover remote folders and show management interface
+  # Discovers system folders from WebDAV and auto-enables them
   # USAGE: configurator_remote_roms_discover_dialog
 
   log i "Opening remote ROMs discovery dialog"
@@ -1373,12 +1378,13 @@ configurator_remote_roms_discover_dialog() {
     return
   fi
 
-  # Show progress while discovering
+  # Discovery: Find system folders on WebDAV server
+  local discovered_map=""  # Format: "system:path\nsystem:path"
+
   (
     echo "10"
     echo "# Connecting to WebDAV..."
 
-    # Generate temp config for discovery
     local rclone_config=$(mktemp)
     local user=$(remote_roms_get_setting "webdav_user")
     local pass=$(remote_roms_get_setting "webdav_pass")
@@ -1392,121 +1398,90 @@ configurator_remote_roms_discover_dialog() {
     echo "pass = $obscured_pass" >> "$rclone_config"
 
     echo "30"
-    echo "# Scanning root folder..."
+    echo "# Scanning for system folders..."
 
-    # Try to list remote root and common subfolders
-    local all_folders=""
+    local available_systems=$(remote_roms_get_available_systems)
+    local found_systems=""
 
-    # Scan root
-    local root_folders=$(RCLONE_CONFIG="$rclone_config" rclone lsf "webdav-discover:/" --max-depth 1 --dirs-only 2>/dev/null | sed 's|/$||')
-    all_folders="$root_folders"
+    # Scan root and common subfolders for system folders
+    for scan_path in "/" "/roms" "/games" "/library"; do
+      local folders=$(RCLONE_CONFIG="$rclone_config" rclone lsf "webdav-discover:$scan_path" --max-depth 1 --dirs-only 2>/dev/null | sed 's|/$||')
 
-    echo "50"
-    echo "# Scanning common subfolders..."
+      while IFS= read -r folder; do
+        [[ -z "$folder" ]] && continue
 
-    # Also scan common subfolders like /roms, /games, /library
-    for subfolder in roms games library; do
-      if echo "$root_folders" | grep -q "^${subfolder}$"; then
-        local sub_folders=$(RCLONE_CONFIG="$rclone_config" rclone lsf "webdav-discover:/$subfolder" --max-depth 1 --dirs-only 2>/dev/null | sed 's|/$||' | sed "s|^|$subfolder/|")
-        all_folders="$all_folders
-$sub_folders"
-      fi
+        local full_path="${scan_path:1}$folder"  # Remove leading /
+        [[ "$scan_path" == "/" ]] && full_path="$folder"
+
+        # Check if folder name matches a known system
+        for sys in $available_systems; do
+          if [[ "$folder" == "$sys" ]]; then
+            # Only add if not already found (prefer shorter paths)
+            if ! echo "$found_systems" | grep -q "^${sys}:"; then
+              found_systems="${found_systems}${sys}:${full_path}\n"
+            fi
+            break
+          fi
+        done
+      done <<< "$folders"
     done
-
-    # Remove duplicates and sort
-    local discovered_folders=$(echo "$all_folders" | sort -u)
 
     rm -f "$rclone_config"
 
     echo "100"
     echo "# Discovery complete"
 
-    # Save discovered folders to temp file using mktemp for security
-    local temp_discover_file=$(mktemp /tmp/remote_roms_discovered.XXXXXX)
-    echo "$discovered_folders" > "$temp_discover_file"
-    echo "$temp_discover_file" > /tmp/remote_roms_discover_file_path
+    # Save results
+    printf "%b" "$found_systems" > /tmp/remote_roms_discovered_map
   ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
     --title "RetroDECK - Discovering Remote Folders" \
     --text="Scanning WebDAV server for available folders..." \
     --width=400 --height=100
 
-  local temp_discover_file=$(cat /tmp/remote_roms_discover_file_path 2>/dev/null)
-  local discovered_folders=""
-  if [[ -f "$temp_discover_file" ]]; then
-    discovered_folders=$(cat "$temp_discover_file" 2>/dev/null)
-    rm -f "$temp_discover_file"
-  fi
-  rm -f /tmp/remote_roms_discover_file_path
+  # Load discovered systems
+  discovered_map=$(cat /tmp/remote_roms_discovered_map 2>/dev/null)
+  rm -f /tmp/remote_roms_discovered_map
 
-  log d "Discovery found folders: $discovered_folders"
+  log d "Discovered systems map: $discovered_map"
 
-  # Build the management list and auto-enable discovered systems
-  local menu_options=()
-  local available_systems=$(remote_roms_get_available_systems)
-  local found_count=0
+  # Auto-enable newly discovered systems
   local auto_enabled_count=0
+  while IFS=':' read -r system path; do
+    [[ -z "$system" ]] && continue
 
-  # Auto-enable and automount discovered folders that match available systems
-  while IFS= read -r folder; do
-    if [[ -n "$folder" ]]; then
-      log d "Checking folder: $folder"
-
-      # Check if this folder matches a known system (either directly or in subfolder)
-      local matching_system=""
-      local folder_basename=$(basename "$folder")
-
-      for sys in $available_systems; do
-        if [[ "$folder" == "$sys" ]] || [[ "$folder_basename" == "$sys" ]]; then
-          matching_system="$sys"
-          ((found_count++))
-          break
-        fi
-      done
-
-      if [[ -n "$matching_system" ]]; then
-        # Check if already configured
-        local existing_config=$(remote_roms_get_mounts | jq --arg s "$matching_system" -r '.[$s] // empty')
-        if [[ -n "$existing_config" ]]; then
-          local is_mounted=$(remote_roms_is_mounted "$matching_system")
-          local automount=$(echo "$existing_config" | jq -r '.automount // false')
-          local status="Configured"
-          [[ "$is_mounted" == "true" ]] && status="Mounted"
-          [[ "$automount" == "true" ]] && status="${status} (Auto)"
-          menu_options+=("$matching_system" "$status - Path: $folder")
-        else
-          # AUTO-ENABLE: New system found - add with automount enabled
-          log i "Auto-enabling remote ROMs for $matching_system (folder: $folder)"
-          remote_roms_add_mount "$matching_system" "$folder"
-          remote_roms_set_mount_automount "$matching_system" "true"
-          ((auto_enabled_count++))
-          
-          # Try to mount immediately
-          if remote_roms_mount_system "$matching_system"; then
-            menu_options+=("$matching_system" "Auto-enabled & mounted - Path: $folder")
-          else
-            menu_options+=("$matching_system" "Auto-enabled (mount failed) - Path: $folder")
-          fi
-        fi
-      fi
+    # Check if already configured
+    local existing_config=$(remote_roms_get_mounts | jq --arg s "$system" -r '.[$s] // empty')
+    if [[ -z "$existing_config" ]]; then
+      log i "Auto-enabling remote ROMs for $system (path: $path)"
+      remote_roms_add_mount "$system" "$path"
+      remote_roms_set_mount_automount "$system" "true"
+      remote_roms_mount_system "$system" 2>/dev/null || true
+      ((auto_enabled_count++))
     fi
-  done <<< "$discovered_folders"
+  done <<< "$discovered_map"
 
-  # Show auto-enable summary if any systems were added
+  # Show summary if new systems were added
   if [[ $auto_enabled_count -gt 0 ]]; then
     configurator_generic_dialog "RetroDECK Configurator - Systems Discovered" "<span foreground='$purple'><b>Found $auto_enabled_count new system(s) on your WebDAV server!</b></span>\n\nThey have been automatically enabled with auto-mount.\n\nThe systems will be mounted automatically on future RetroDECK startups."
   fi
 
-  # Also add any configured mounts that weren't discovered
+  # Build menu from all configured mounts
+  local menu_options=()
   local configured_systems=$(remote_roms_get_mounts | jq -r 'keys[]')
+
   while IFS= read -r system; do
-    if [[ -n "$system" ]]; then
-      if ! echo "$discovered_folders" | grep -q "^${system}$"; then
-        local is_mounted=$(remote_roms_is_mounted "$system")
-        local status="Configured (not on server)"
-        [[ "$is_mounted" == "true" ]] && status="Mounted (not on server)"
-        menu_options+=("$system" "$status - Click to manage")
-      fi
-    fi
+    [[ -z "$system" ]] && continue
+
+    local config=$(remote_roms_get_mounts | jq --arg s "$system" -r '.[$s]')
+    local path=$(echo "$config" | jq -r '.remote_path // empty')
+    local is_mounted=$(remote_roms_is_mounted "$system")
+    local automount=$(echo "$config" | jq -r '.automount // false')
+
+    local status="Configured"
+    [[ "$is_mounted" == "true" ]] && status="Mounted"
+    [[ "$automount" == "true" ]] && status="${status} (Auto)"
+
+    menu_options+=("$system" "$status - Path: $path")
   done <<< "$configured_systems"
 
   if [[ ${#menu_options[@]} -eq 0 ]]; then
@@ -1523,14 +1498,11 @@ $sub_folders"
     --column="System" --column="Status" \
     "${menu_options[@]}")
 
-  local rc=$?
-
-  if [[ $rc -ne 0 || -z "$choice" ]]; then
+  if [[ $? -ne 0 || -z "$choice" ]]; then
     configurator_remote_dialog
     return
   fi
 
-  # Open the simplified management dialog for the selected system
   configurator_remote_roms_manage_system_dialog "$choice"
 }
 
@@ -1688,4 +1660,70 @@ configurator_remote_roms_manage_system_dialog() {
   esac
 
   done  # End of while loop - dialog refreshes if refresh=true
+}
+
+configurator_remote_roms_repair_dialog() {
+  # Dialog to repair all stale mounts after Quick Resume
+  # USAGE: configurator_remote_roms_repair_dialog
+
+  log i "Opening Repair All Mounts dialog"
+
+  # Show progress while repairing
+  (
+    echo "10"
+    echo "# Checking mount health..."
+
+    local mounts=$(remote_roms_get_mounts)
+    local total=$(echo "$mounts" | jq 'length')
+    local repaired=0
+    local failed=0
+
+    if [[ "$total" -eq 0 ]]; then
+      echo "100"
+      echo "# No mounts configured"
+      echo "none" > /tmp/remote_roms_repair_result
+    else
+      echo "30"
+      echo "# Repairing mounts..."
+
+      # Call repair function and capture results
+      local result=$(remote_roms_repair_all_mounts 2>&1)
+
+      echo "90"
+      echo "# Finalizing..."
+
+      # Parse results
+      repaired=$(echo "$result" | grep -oP 'Repaired: \K[0-9]+' || echo "0")
+      failed=$(echo "$result" | grep -oP 'Failed: \K[0-9]+' || echo "0")
+
+      echo "100"
+      echo "# Complete"
+      echo "${repaired}|${failed}|${total}" > /tmp/remote_roms_repair_result
+    fi
+  ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
+    --title "RetroDECK - Repairing Mounts" \
+    --text="Checking and repairing remote ROM mounts..." \
+    --width=400 --height=100
+
+  local result=$(cat /tmp/remote_roms_repair_result 2>/dev/null)
+  rm -f /tmp/remote_roms_repair_result
+
+  case "$result" in
+    "none")
+      configurator_generic_dialog "RetroDECK Configurator - Repair Mounts" "<span foreground='$purple'><b>No mounts configured.</b></span>\n\nConfigure mounts first in Manage Mounts."
+      ;;
+    *)
+      local repaired=$(echo "$result" | cut -d'|' -f1)
+      local failed=$(echo "$result" | cut -d'|' -f2)
+      local total=$(echo "$result" | cut -d'|' -f3)
+
+      if [[ "$failed" -eq 0 ]]; then
+        configurator_generic_dialog "RetroDECK Configurator - Repair Complete" "<span foreground='$purple'><b>All mounts repaired successfully!</b></span>\n\nRepaired: $repaired/$total mounts\n\nYour remote ROMs are ready to use."
+      else
+        configurator_generic_dialog "RetroDECK Configurator - Repair Complete" "<span foreground='$purple'><b>Mount repair completed with issues.</b></span>\n\nRepaired: $repaired/$total mounts\nFailed: $failed mounts\n\nCheck the logs for details."
+      fi
+      ;;
+  esac
+
+  configurator_remote_dialog
 }
