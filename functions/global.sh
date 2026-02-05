@@ -21,10 +21,14 @@ rotate_logs
 # OS detection
 # Detect if we're running inside a Flatpak sandbox. When inside Flatpak we
 # should avoid using `flatpak-spawn` or calling host-only tools such as
-# `xrandr`.
+# `xrandr` for general operations.
 # We always run inside the Flatpak runtime for the app; avoid calling
-# any host-only tools (flatpak-spawn, xrandr, lspci). Use sysfs, drm and
-# /proc where possible.
+# any host-only tools (flatpak-spawn, xrandr, lspci) for general operations.
+# Use sysfs, drm and /proc where possible.
+# NOTE: flatpak-spawn is used specifically for FUSE mount operations in
+# remote_roms.sh, as this requires host-level filesystem access that cannot
+# be achieved within the sandbox.
+
 system_gpu_info=""
 for drmdev in /sys/class/drm/*; do
   # device subdir might not exist for some entries

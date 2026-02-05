@@ -197,12 +197,6 @@ else
     export use_cache="false"
 fi
 
-# Add portal permission in cooker mode
-if [[ "$IS_COOKER" == "true" ]]; then
-    sed -i '/finish-args:/a \ \ - --talk-name=org.freedesktop.Flatpak' "$MANIFEST_REWORKED"
-    echo "Added update portal permission (cooker)."
-fi
-
 ## BUILD TIME: ccache config
 
 # Checking if the user wants to use ccache, disabled in CI/CD mode

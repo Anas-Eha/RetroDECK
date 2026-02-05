@@ -229,6 +229,14 @@ remote_roms_mount_system() {
 
   remote_roms_log_debug "mount_system: mounting $system (path: $system_path, remote: $remote_visible)"
 
+  # Check if flatpak-spawn is available (required for host FUSE delegation)
+  if ! command -v flatpak-spawn &> /dev/null; then
+    log e "flatpak-spawn not available - cannot mount $system"
+    remote_roms_log_debug "mount_system: ERROR - flatpak-spawn not found (needed for host FUSE delegation)"
+    return 1
+  fi
+  remote_roms_log_debug "mount_system: flatpak-spawn available"
+
   # Check if FUSE is available
   local fuse_status
   fuse_status=$(remote_roms_check_fuse)
@@ -302,23 +310,43 @@ remote_roms_mount_system() {
   } >> "$rd_xdg_config_logs_path/rclone_commands.log"
 
   # Mount remote to visible remote/ folder
-  if rclone mount "$rclone_remote" "$rclone_mount_point" "${rclone_args[@]}"; then
-
-    log i "Mounted $system remote to $remote_visible"
-
-    # Create QuickResume ROM if setting enabled
-    if [[ $(get_setting_value "$rd_conf" "remote_roms_quickresume" "retrodeck" "options") == "true" ]]; then
-      remote_roms_create_quickresume "$system"
+  # CRITICAL: Use rclone-host (not rclone) for mount operations
+  # rclone-host runs on the HOST via flatpak-spawn, which is required for FUSE mounts
+  # to be visible on the host filesystem. Mounts created inside the sandbox are isolated
+  # and not visible to host applications or the user.
+  local mount_success=false
+  if command -v rclone-host &> /dev/null; then
+    remote_roms_log_debug "mount_system: Using rclone-host for FUSE mount on host"
+    if rclone-host mount "$rclone_remote" "$rclone_mount_point" "${rclone_args[@]}"; then
+      mount_success=true
+      log i "Mounted $system remote to $remote_visible (via host)"
+    else
+      log e "Failed to mount $system via host rclone-host (check $logs_path/rclone-$system.log)"
+      remote_roms_log_debug "mount_system: rclone-host mount failed"
+      return 1
     fi
-
-    remote_roms_log_debug "mount_system: $system mounted successfully"
-    return 0
   else
-    log e "Failed to mount $system (check $logs_path/rclone-$system.log)"
-    remote_roms_log_debug "mount_system: $system mount failed"
-    return 1
+    # Fallback: try sandboxed rclone (mounts will be isolated to sandbox)
+    # This is NOT recommended as mounts won't be visible on host
+    remote_roms_log_debug "mount_system: WARNING - rclone-host not found, using sandboxed rclone (mounts will be isolated)"
+    log w "rclone-host not found - attempting sandboxed mount (may not be visible on host)"
+    if rclone mount "$rclone_remote" "$rclone_mount_point" "${rclone_args[@]}"; then
+      mount_success=true
+      log i "Mounted $system remote to $remote_visible (sandboxed - may not be visible on host)"
+    else
+      log e "Failed to mount $system (check $logs_path/rclone-$system.log)"
+      remote_roms_log_debug "mount_system: $system mount failed"
+      return 1
+    fi
   fi
-}
+
+  # Create QuickResume ROM if setting enabled
+  if [[ "$mount_success" == "true" && $(get_setting_value "$rd_conf" "remote_roms_quickresume" "retrodeck" "options") == "true" ]]; then
+    remote_roms_create_quickresume "$system"
+  fi
+
+  remote_roms_log_debug "mount_system: $system mounted successfully"
+  return 0
 
 remote_roms_unmount_system() {
   # Unmount a specific system
@@ -632,6 +660,16 @@ remote_roms_diagnose_fuse() {
 
   echo "=== FUSE Diagnosis ===" > "$diag_log"
   echo "Date: $(date)" >> "$diag_log"
+  echo "" >> "$diag_log"
+
+  echo "--- Flatpak Spawn (Required for host FUSE operations) ---" >> "$diag_log"
+  echo "flatpak-spawn: $(command -v flatpak-spawn 2>/dev/null || echo 'NOT FOUND')" >> "$diag_log"
+  echo "flatpak-spawn test: $(flatpak-spawn --host echo 'OK' 2>/dev/null || echo 'FAILED - check --talk-name=org.freedesktop.Flatpak permission')" >> "$diag_log"
+  echo "" >> "$diag_log"
+
+  echo "--- Rclone Wrappers ---" >> "$diag_log"
+  echo "rclone (sandboxed): $(command -v rclone 2>/dev/null || echo 'NOT FOUND')" >> "$diag_log"
+  echo "rclone-host (host via flatpak-spawn): $(command -v rclone-host 2>/dev/null || echo 'NOT FOUND - REQUIRED for FUSE mounts')" >> "$diag_log"
   echo "" >> "$diag_log"
 
   echo "--- FUSE Binaries ---" >> "$diag_log"

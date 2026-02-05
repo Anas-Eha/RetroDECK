@@ -30,11 +30,9 @@ add-extensions:
     add-ld-path: lib
 
   # FUSE support for rclone mount (WebDAV remote ROMs)
-  # Mounts are sandboxed - only visible inside RetroDECK
-  org.freedesktop.Platform.FUSE:
-    directory: lib/fuse
-    version: '25.08'
-    add-ld-path: lib
+  # Uses flatpak-spawn --host to run rclone on host system (rclone-host wrapper)
+  # FUSE mounts MUST be created on host to be visible on host filesystem
+  # Mounts are visible on host and shared with sandbox via --filesystem=host
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
@@ -53,17 +51,18 @@ finish-args:
   # D-Bus: Manage user session (systemd-logind)
   - --talk-name=org.freedesktop.login1.Manager
 
+  # D-Bus: Required for flatpak-spawn --host to call host system tools (fusermount3 for FUSE mounts)
+  # This is REQUIRED for remote ROMs WebDAV mounting functionality
+  - --talk-name=org.freedesktop.Flatpak
+
   # D-Bus: Share IPC namespace for inter-process communication
   - --share=ipc
 
-  # Devices: All device access (e.g., /dev/*, used for various inputs)
+  # Devices: All device access (e.g., /dev/*, used for various inputs and FUSE /dev/fuse)
   - --device=all
 
-  # FUSE: Shared memory device access (required for rclone mount)
+  # FUSE: Shared memory device access (required for rclone mount inter-process communication)
   - --device=shm
-
-  # FUSE: Required capability for mount operations (SYS_ADMIN)
-  - --allow=devel
 
   # Devices: Bluetooth access (used for various inputs)
   - --allow=bluetooth
@@ -87,8 +86,7 @@ finish-args:
   # GStreamer integration
   - --env=GST_PLUGIN_SYSTEM_PATH=/app/lib32/gstreamer-1.0:/app/lib/gstreamer-1.0:/usr/lib/i386-linux-gnu/gstreamer-1.0:/usr/lib/x86_64-linux-gnu/gstreamer-1.0
 
-  # FUSE/rclone: Add FUSE extension to PATH for fusermount3
-  - --env=PATH=/app/bin:/app/lib/fuse/bin:/usr/bin
+  # rclone: PATH includes /app/bin for fusermount3 wrapper
 
   # Gamescope integration
   - --filesystem=xdg-run/gamescope-0:ro
@@ -195,28 +193,72 @@ modules:
 
   # -------------------------------------------------------------------------
   # rclone - manage files on cloud storage (required for WebDAV remote ROMs)
-  # Uses FUSE extension for mount support (sandboxed - mounts only visible inside RetroDECK)
+  # Uses flatpak-spawn --host to call host system's fusermount3
   # -------------------------------------------------------------------------
 
   - name: rclone
     buildsystem: simple
     build-commands:
-      # 1. Install rclone binary
-      - install -Dm755 rclone "${FLATPAK_DEST}/bin/rclone"
+      # 1. Install rclone binary to libexec (not bin) to avoid PATH conflicts
+      # We will create a wrapper script in bin/ instead
+      - install -Dm755 rclone "${FLATPAK_DEST}/libexec/rclone"
       
-      # 2. Create wrapper scripts for fusermount3/fusermount
-      # The FUSE extension provides binaries in /app/lib/fuse/bin/
-      # These wrappers ensure rclone can find them in PATH
+      # 2. Create rclone wrapper for sandboxed operations
+      # For FUSE mounts, use rclone-host wrapper instead
+      - |
+        cat > "${FLATPAK_DEST}/bin/rclone" << 'EOF'
+        #!/bin/bash
+        # rclone wrapper - runs rclone inside sandbox for non-mount operations
+        # For mount operations, use rclone-host instead (which uses flatpak-spawn --host)
+        exec /app/libexec/rclone "$@"
+        EOF
+        chmod +x "${FLATPAK_DEST}/bin/rclone"
+      
+      # 3. Create rclone-host wrapper for FUSE mount operations
+      # This runs rclone on the HOST via flatpak-spawn, required for FUSE mounts
+      # to be visible on the host filesystem
+      - |
+        cat > "${FLATPAK_DEST}/bin/rclone-host" << 'EOF'
+        #!/bin/bash
+        # rclone-host wrapper - runs rclone on the HOST via flatpak-spawn
+        # REQUIRED for FUSE mount operations to work properly
+        # Mounts created inside sandbox are not visible on host, so we delegate to host
+        exec flatpak-spawn --host rclone "$@"
+        EOF
+        chmod +x "${FLATPAK_DEST}/bin/rclone-host"
+      
+      # 4. Create fusermount3 wrapper using flatpak-spawn --host
+      # This calls the host system's fusermount3 for unmounting
       - |
         cat > "${FLATPAK_DEST}/bin/fusermount3" << 'EOF'
-        #!/bin/sh
-        # Wrapper to FUSE extension's fusermount3 binary
-        exec /app/lib/fuse/bin/fusermount3 "$@"
+        #!/bin/bash
+        # Wrapper to call host system's fusermount3 via flatpak-spawn
+        # Source: https://github.com/tinywrkb/flatpak-shared-modules
+        if [ -z "$_FUSE_COMMFD" ]; then
+            FD_ARGS=
+        else
+            FD_ARGS="--env=_FUSE_COMMFD=${_FUSE_COMMFD}"
+            [ "$_FUSE_COMMFD" -gt 2 ] && FD_ARGS+=" --forward-fd=${_FUSE_COMMFD}"
+        fi
+        exec flatpak-spawn --host $FD_ARGS fusermount3 "$@"
         EOF
         chmod +x "${FLATPAK_DEST}/bin/fusermount3"
       
-      # 3. Create fusermount symlink for compatibility with older tools
-      - ln -sf fusermount3 "${FLATPAK_DEST}/bin/fusermount"
+      # 5. Create fusermount wrapper for compatibility
+      - |
+        cat > "${FLATPAK_DEST}/bin/fusermount" << 'EOF'
+        #!/bin/bash
+        # Wrapper to call host system's fusermount via flatpak-spawn
+        # Source: https://github.com/tinywrkb/flatpak-shared-modules
+        if [ -z "$_FUSE_COMMFD" ]; then
+            FD_ARGS=
+        else
+            FD_ARGS="--env=_FUSE_COMMFD=${_FUSE_COMMFD}"
+            [ "$_FUSE_COMMFD" -gt 2 ] && FD_ARGS+=" --forward-fd=${_FUSE_COMMFD}"
+        fi
+        exec flatpak-spawn --host $FD_ARGS fusermount "$@"
+        EOF
+        chmod +x "${FLATPAK_DEST}/bin/fusermount"
       
     sources:
       - type: archive
