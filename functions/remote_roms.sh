@@ -229,14 +229,6 @@ remote_roms_mount_system() {
 
   remote_roms_log_debug "mount_system: mounting $system (path: $system_path, remote: $remote_visible)"
 
-  # Check if flatpak-spawn is available (required for host FUSE delegation)
-  if ! command -v flatpak-spawn &> /dev/null; then
-    log e "flatpak-spawn not available - cannot mount $system"
-    remote_roms_log_debug "mount_system: ERROR - flatpak-spawn not found (needed for host FUSE delegation)"
-    return 1
-  fi
-  remote_roms_log_debug "mount_system: flatpak-spawn available"
-
   # Check if FUSE is available
   local fuse_status
   fuse_status=$(remote_roms_check_fuse)
@@ -304,40 +296,39 @@ remote_roms_mount_system() {
   # Write to dedicated debug file
   {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] RCLONE MOUNT COMMAND for $system:"
-    printf '  rclone mount %q %q \\n' "$rclone_remote" "$rclone_mount_point"
-    printf '    %s \\n' "${rclone_args[@]}"
+    printf '  rclone mount %q %q \n' "$rclone_remote" "$rclone_mount_point"
+    printf '    %s \n' "${rclone_args[@]}"
     echo ""
   } >> "$rd_xdg_config_logs_path/rclone_commands.log"
 
   # Mount remote to visible remote/ folder
-  # CRITICAL: Use rclone-host (not rclone) for mount operations
-  # rclone-host runs on the HOST via flatpak-spawn, which is required for FUSE mounts
-  # to be visible on the host filesystem. Mounts created inside the sandbox are isolated
-  # and not visible to host applications or the user.
+  # rclone runs inside the sandbox with bundled libfuse
+  # fusermount3 wrapper handles unmounting via flatpak-spawn --host
   local mount_success=false
-  if command -v rclone-host &> /dev/null; then
-    remote_roms_log_debug "mount_system: Using rclone-host for FUSE mount on host"
-    if rclone-host mount "$rclone_remote" "$rclone_mount_point" "${rclone_args[@]}"; then
-      mount_success=true
-      log i "Mounted $system remote to $remote_visible (via host)"
-    else
-      log e "Failed to mount $system via host rclone-host (check $logs_path/rclone-$system.log)"
-      remote_roms_log_debug "mount_system: rclone-host mount failed"
-      return 1
-    fi
+
+  # Run rclone mount
+  local rclone_output
+  local rclone_exit_code
+  rclone_output=$(rclone mount "$rclone_remote" "$rclone_mount_point" "${rclone_args[@]}" --daemon 2>&1)
+  rclone_exit_code=$?
+
+  # --daemon returns immediately, so we need to verify the mount actually succeeded
+  sleep 1
+  if [[ $rclone_exit_code -eq 0 ]] && mountpoint -q "$rclone_mount_point" 2>/dev/null; then
+    mount_success=true
+    log i "Mounted $system remote to $remote_visible"
   else
-    # Fallback: try sandboxed rclone (mounts will be isolated to sandbox)
-    # This is NOT recommended as mounts won't be visible on host
-    remote_roms_log_debug "mount_system: WARNING - rclone-host not found, using sandboxed rclone (mounts will be isolated)"
-    log w "rclone-host not found - attempting sandboxed mount (may not be visible on host)"
-    if rclone mount "$rclone_remote" "$rclone_mount_point" "${rclone_args[@]}"; then
-      mount_success=true
-      log i "Mounted $system remote to $remote_visible (sandboxed - may not be visible on host)"
-    else
-      log e "Failed to mount $system (check $logs_path/rclone-$system.log)"
-      remote_roms_log_debug "mount_system: $system mount failed"
-      return 1
+    # Mount failed - capture error from log file or output
+    local error_detail=""
+    if [[ -f "$logs_path/rclone-$system.log" ]]; then
+      error_detail=$(tail -n 5 "$logs_path/rclone-$system.log" 2>/dev/null)
     fi
+    if [[ -z "$error_detail" && -n "$rclone_output" ]]; then
+      error_detail="$rclone_output"
+    fi
+    log e "Failed to mount $system${error_detail:+: $error_detail}"
+    remote_roms_log_debug "mount_system: $system mount failed (exit: $rclone_exit_code)"
+    return 1
   fi
 
   # Create QuickResume ROM if setting enabled
@@ -351,16 +342,15 @@ remote_roms_mount_system() {
 
 remote_roms_unmount_system() {
   # Unmount a specific system
+  # Uses fusermount3 wrapper which calls host via flatpak-spawn
   # USAGE: remote_roms_unmount_system "$system"
 
   local system="$1"
   local mount_point="$roms_path/$system/remote"
 
   if mountpoint -q "$mount_point" 2>/dev/null; then
-    # Try fusermount3 first, then fusermount, then umount
+    # Use fusermount3 wrapper (calls host via flatpak-spawn)
     if command -v fusermount3 &> /dev/null && fusermount3 -u "$mount_point" 2>/dev/null; then
-      : # success
-    elif command -v fusermount &> /dev/null && fusermount -u "$mount_point" 2>/dev/null; then
       : # success
     elif umount "$mount_point" 2>/dev/null; then
       : # success
@@ -663,19 +653,18 @@ remote_roms_diagnose_fuse() {
   echo "Date: $(date)" >> "$diag_log"
   echo "" >> "$diag_log"
 
-  echo "--- Flatpak Spawn (Required for host FUSE operations) ---" >> "$diag_log"
-  echo "flatpak-spawn: $(command -v flatpak-spawn 2>/dev/null || echo 'NOT FOUND')" >> "$diag_log"
-  echo "flatpak-spawn test: $(flatpak-spawn --host echo 'OK' 2>/dev/null || echo 'FAILED - check --talk-name=org.freedesktop.Flatpak permission')" >> "$diag_log"
-  echo "" >> "$diag_log"
-
-  echo "--- Rclone Wrappers ---" >> "$diag_log"
-  echo "rclone (sandboxed): $(command -v rclone 2>/dev/null || echo 'NOT FOUND')" >> "$diag_log"
-  echo "rclone-host (host via flatpak-spawn): $(command -v rclone-host 2>/dev/null || echo 'NOT FOUND - REQUIRED for FUSE mounts')" >> "$diag_log"
+  echo "--- Rclone ---" >> "$diag_log"
+  echo "rclone: $(command -v rclone 2>/dev/null || echo 'NOT FOUND')" >> "$diag_log"
+  echo "rclone version: $(rclone version 2>/dev/null | head -1 || echo 'N/A')" >> "$diag_log"
   echo "" >> "$diag_log"
 
   echo "--- FUSE Binaries ---" >> "$diag_log"
   echo "fusermount3: $(command -v fusermount3 2>/dev/null || echo 'NOT FOUND')" >> "$diag_log"
-  echo "fusermount: $(command -v fusermount 2>/dev/null || echo 'NOT FOUND')" >> "$diag_log"
+  echo "fusermount3 type: $(file $(command -v fusermount3 2>/dev/null) 2>/dev/null || echo 'N/A')" >> "$diag_log"
+  echo "" >> "$diag_log"
+
+  echo "--- libfuse ---" >> "$diag_log"
+  ls -la /app/lib/libfuse* 2>/dev/null >> "$diag_log" || echo "No libfuse in /app/lib" >> "$diag_log"
   echo "" >> "$diag_log"
 
   echo "--- PATH ---" >> "$diag_log"
