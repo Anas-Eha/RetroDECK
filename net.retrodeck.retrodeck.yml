@@ -205,60 +205,77 @@ modules:
       
       # 2. Create rclone wrapper for sandboxed operations
       # For FUSE mounts, use rclone-host wrapper instead
-      - |
-        cat > "${FLATPAK_DEST}/bin/rclone" << 'EOF'
-        #!/bin/bash
-        # rclone wrapper - runs rclone inside sandbox for non-mount operations
-        # For mount operations, use rclone-host instead (which uses flatpak-spawn --host)
-        exec /app/libexec/rclone "$@"
-        EOF
-        chmod +x "${FLATPAK_DEST}/bin/rclone"
+      - mkdir -p "${FLATPAK_DEST}/bin"
+      - >
+        echo '#!/bin/bash'
+        > "${FLATPAK_DEST}/bin/rclone"
+      - >
+        echo '# rclone wrapper - runs rclone inside sandbox for non-mount operations'
+        >> "${FLATPAK_DEST}/bin/rclone"
+      - >
+        echo '# For mount operations, use rclone-host instead (which uses flatpak-spawn --host)'
+        >> "${FLATPAK_DEST}/bin/rclone"
+      - >
+        echo 'exec /app/libexec/rclone "$@"'
+        >> "${FLATPAK_DEST}/bin/rclone"
+      - chmod +x "${FLATPAK_DEST}/bin/rclone"
       
       # 3. Create rclone-host wrapper for FUSE mount operations
       # This runs rclone on the HOST via flatpak-spawn, required for FUSE mounts
       # to be visible on the host filesystem
-      - |
-        cat > "${FLATPAK_DEST}/bin/rclone-host" << 'EOF'
-        #!/bin/bash
-        # rclone-host wrapper - runs rclone on the HOST via flatpak-spawn
-        # REQUIRED for FUSE mount operations to work properly
-        # Mounts created inside sandbox are not visible on host, so we delegate to host
-        exec flatpak-spawn --host rclone "$@"
-        EOF
-        chmod +x "${FLATPAK_DEST}/bin/rclone-host"
+      - >
+        echo '#!/bin/bash'
+        > "${FLATPAK_DEST}/bin/rclone-host"
+      - >
+        echo '# rclone-host wrapper - runs rclone on the HOST via flatpak-spawn'
+        >> "${FLATPAK_DEST}/bin/rclone-host"
+      - >
+        echo '# REQUIRED for FUSE mount operations to work properly'
+        >> "${FLATPAK_DEST}/bin/rclone-host"
+      - >
+        echo '# Mounts created inside sandbox are not visible on host, so we delegate to host'
+        >> "${FLATPAK_DEST}/bin/rclone-host"
+      - >
+        echo 'exec flatpak-spawn --host rclone "$@"'
+        >> "${FLATPAK_DEST}/bin/rclone-host"
+      - chmod +x "${FLATPAK_DEST}/bin/rclone-host"
       
       # 4. Create fusermount3 wrapper using flatpak-spawn --host
       # This calls the host system's fusermount3 for unmounting
-      - |
-        cat > "${FLATPAK_DEST}/bin/fusermount3" << 'EOF'
-        #!/bin/bash
-        # Wrapper to call host system's fusermount3 via flatpak-spawn
-        # Source: https://github.com/tinywrkb/flatpak-shared-modules
-        if [ -z "$_FUSE_COMMFD" ]; then
-            FD_ARGS=
-        else
-            FD_ARGS="--env=_FUSE_COMMFD=${_FUSE_COMMFD}"
-            [ "$_FUSE_COMMFD" -gt 2 ] && FD_ARGS+=" --forward-fd=${_FUSE_COMMFD}"
-        fi
-        exec flatpak-spawn --host $FD_ARGS fusermount3 "$@"
-        EOF
-        chmod +x "${FLATPAK_DEST}/bin/fusermount3"
+      - >
+        echo '#!/bin/bash'
+        > "${FLATPAK_DEST}/bin/fusermount3"
+      - >
+        echo '# Wrapper to call host system'"'"'s fusermount3 via flatpak-spawn'
+        >> "${FLATPAK_DEST}/bin/fusermount3"
+      - >
+        echo '# Source: https://github.com/tinywrkb/flatpak-shared-modules'
+        >> "${FLATPAK_DEST}/bin/fusermount3"
+      - >
+        echo 'if [ -z "$_FUSE_COMMFD" ]; then FD_ARGS=; else FD_ARGS="--env=_FUSE_COMMFD=${_FUSE_COMMFD}"; [ "$_FUSE_COMMFD" -gt 2 ] && FD_ARGS+=" --forward-fd=${_FUSE_COMMFD}"; fi'
+        >> "${FLATPAK_DEST}/bin/fusermount3"
+      - >
+        echo 'exec flatpak-spawn --host $FD_ARGS fusermount3 "$@"'
+        >> "${FLATPAK_DEST}/bin/fusermount3"
+      - chmod +x "${FLATPAK_DEST}/bin/fusermount3"
       
       # 5. Create fusermount wrapper for compatibility
-      - |
-        cat > "${FLATPAK_DEST}/bin/fusermount" << 'EOF'
-        #!/bin/bash
-        # Wrapper to call host system's fusermount via flatpak-spawn
-        # Source: https://github.com/tinywrkb/flatpak-shared-modules
-        if [ -z "$_FUSE_COMMFD" ]; then
-            FD_ARGS=
-        else
-            FD_ARGS="--env=_FUSE_COMMFD=${_FUSE_COMMFD}"
-            [ "$_FUSE_COMMFD" -gt 2 ] && FD_ARGS+=" --forward-fd=${_FUSE_COMMFD}"
-        fi
-        exec flatpak-spawn --host $FD_ARGS fusermount "$@"
-        EOF
-        chmod +x "${FLATPAK_DEST}/bin/fusermount"
+      - >
+        echo '#!/bin/bash'
+        > "${FLATPAK_DEST}/bin/fusermount"
+      - >
+        echo '# Wrapper to call host system'"'"'s fusermount via flatpak-spawn'
+        >> "${FLATPAK_DEST}/bin/fusermount"
+      - >
+        echo '# Source: https://github.com/tinywrkb/flatpak-shared-modules'
+        >> "${FLATPAK_DEST}/bin/fusermount"
+      - >
+        echo 'if [ -z "$_FUSE_COMMFD" ]; then FD_ARGS=; else FD_ARGS="--env=_FUSE_COMMFD=${_FUSE_COMMFD}"; [ "$_FUSE_COMMFD" -gt 2 ] && FD_ARGS+=" --forward-fd=${_FUSE_COMMFD}"; fi'
+        >> "${FLATPAK_DEST}/bin/fusermount"
+      - >
+        echo 'exec flatpak-spawn --host $FD_ARGS fusermount "$@"'
+        >> "${FLATPAK_DEST}/bin/fusermount"
+      - chmod +x "${FLATPAK_DEST}/bin/fusermount"
       
     sources:
       - type: archive
