@@ -1266,7 +1266,7 @@ configurator_remote_dialog() {
   # Initialize config if needed
   remote_roms_init_config
 
-  local global_enabled=$(remote_roms_is_global_enabled)
+  local global_enabled=$(remote_roms_get_setting "global_enabled")
   local status_text="Disabled"
   [[ "$global_enabled" == "true" ]] && status_text="Enabled"
 
@@ -1474,7 +1474,8 @@ configurator_remote_roms_discover_dialog() {
 
     local config=$(remote_roms_get_mounts | jq --arg s "$system" -r '.[$s]')
     local path=$(echo "$config" | jq -r '.remote_path // empty')
-    local is_mounted=$(remote_roms_is_mounted "$system")
+    local is_mounted="false"
+    mountpoint -q "$roms_path/$system/remote" 2>/dev/null && is_mounted="true"
     local automount=$(echo "$config" | jq -r '.automount // false')
 
     local status="Configured"

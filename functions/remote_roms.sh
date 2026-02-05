@@ -34,6 +34,32 @@ _remote_roms_write_rclone_config() {
   echo "pass = $obscured_pass" >> "$config_file"
 }
 
+# Internal helper: Ensure fusermount3 wrapper is installed
+_remote_roms_ensure_fusermount_wrapper() {
+  # Ensures the fusermount3 wrapper is installed at the expected location
+  # The wrapper calls host fusermount3 via flatpak-spawn to avoid D-Bus issues in sandbox
+  # USAGE: _remote_roms_ensure_fusermount_wrapper
+  # Returns: path to wrapper
+
+  local fusermount_wrapper="${XDG_CONFIG_HOME}/rclone/fusermount3"
+
+  if [[ ! -x "$fusermount_wrapper" ]]; then
+    mkdir -p "${XDG_CONFIG_HOME}/rclone"
+    if [[ -f "/app/libexec/fusermount-wrapper.sh" ]]; then
+      cp "/app/libexec/fusermount-wrapper.sh" "$fusermount_wrapper"
+    else
+      # Fallback: create inline if source not available
+      echo '#!/bin/sh' > "$fusermount_wrapper"
+      echo 'if [ -z "$_FUSE_COMMFD" ]; then FD_ARGS=; else FD_ARGS="--env=_FUSE_COMMFD=${_FUSE_COMMFD} --forward-fd=${_FUSE_COMMFD}"; fi' >> "$fusermount_wrapper"
+      echo 'if [ -e /proc/self/fd/3 ] && [ 3 != "$_FUSE_COMMFD" ]; then FD_ARGS="$FD_ARGS --forward-fd=3"; fi' >> "$fusermount_wrapper"
+      echo 'exec flatpak-spawn --host --forward-fd=1 --forward-fd=2 $FD_ARGS fusermount3 "$@"' >> "$fusermount_wrapper"
+    fi
+    chmod +x "$fusermount_wrapper"
+  fi
+
+  echo "$fusermount_wrapper"
+}
+
 # ============================================
 # Configuration Functions
 # ============================================
@@ -65,17 +91,6 @@ remote_roms_set_setting() {
   # Set a remote ROMs setting value
   # USAGE: remote_roms_set_setting "setting_name" "value"
   jq --arg val "$2" ".remote_roms.$1 = \$val" "$rd_conf" > "$rd_conf.tmp" && mv "$rd_conf.tmp" "$rd_conf"
-}
-
-remote_roms_is_global_enabled() {
-  # Check if remote ROMs global feature is enabled
-  # USAGE: if [[ $(remote_roms_is_global_enabled) == "true" ]]; then ...
-  local enabled=$(remote_roms_get_setting "global_enabled")
-  if [[ "$enabled" == "true" ]]; then
-    echo "true"
-  else
-    echo "false"
-  fi
 }
 
 # ============================================
@@ -167,15 +182,6 @@ remote_roms_remove_mount() {
   log i "Removed mount for $system"
 }
 
-remote_roms_toggle_mount() {
-  # Enable/disable a mount
-  # USAGE: remote_roms_toggle_mount "$system" "true|false"
-
-  local system="$1"
-  local enabled="$2"
-  jq --arg s "$system" --argjson e "$enabled" '.remote_roms.mounts[$s].enabled = $e' "$rd_conf" > "$rd_conf.tmp" && mv "$rd_conf.tmp" "$rd_conf"
-}
-
 remote_roms_set_mount_automount() {
   # Enable/disable auto-mount for a system
   # USAGE: remote_roms_set_mount_automount "$system" "true|false"
@@ -187,8 +193,6 @@ remote_roms_set_mount_automount() {
 
   log i "Auto-mount for $system set to $automount"
 }
-
-
 
 remote_roms_get_mounts() {
   # Get all mount configurations
@@ -231,149 +235,65 @@ remote_roms_mount_system() {
   # Downloaded files go to roms/<system>/ (local cache)
   # USAGE: remote_roms_mount_system "$system"
 
-  local system system_path remote_visible mount_config enabled remote_path
-  local cache_mode read_ahead cache_size
-
-  system="$1"
-  system_path="$roms_path/$system"
-  remote_visible="$roms_path/$system/remote"
+  local system="$1"
+  local system_path="$roms_path/$system"
+  local remote_visible="$system_path/remote"
 
   remote_roms_log_debug "mount_system: mounting $system (path: $system_path, remote: $remote_visible)"
 
-  # Check if FUSE is available
-  local fuse_status
-  fuse_status=$(remote_roms_check_fuse)
-  if [[ "$fuse_status" == "none" ]]; then
+  # Reuse: Check FUSE availability
+  if [[ "$(remote_roms_check_fuse)" == "none" ]]; then
     log e "FUSE not available - cannot mount $system"
     remote_roms_log_debug "mount_system: ERROR - FUSE (fusermount3/fusermount) not found"
-    remote_roms_log_debug "mount_system: Running FUSE diagnosis..."
-    remote_roms_diagnose_fuse
+    [[ "${REMOTE_ROMS_DEBUG:-0}" == "1" ]] && remote_roms_diagnose_fuse
     return 1
   fi
-  remote_roms_log_debug "mount_system: FUSE available: $fuse_status"
 
-  # Check if already mounted
-  if mountpoint -q "$remote_visible" 2>/dev/null; then
+  # Reuse: Check if already mounted
+  if mountpoint -q "$roms_path/$system/remote" 2>/dev/null; then
     log i "$system already mounted"
     return 0
   fi
 
-  mount_config=$(jq --arg s "$system" '.remote_roms.mounts[$s] // empty' "$rd_conf")
-
-  if [[ -z "$mount_config" ]]; then
-    log e "No mount config for $system"
-    return 1
-  fi
-
-  enabled=$(echo "$mount_config" | jq -r '.enabled')
+  # Get and validate mount config
+  local enabled=$(jq -r ".remote_roms.mounts[\"$system\"].enabled" "$rd_conf")
   [[ "$enabled" != "true" ]] && return 0
 
-  remote_path=$(echo "$mount_config" | jq -r '.remote_path')
+  local remote_path=$(jq -r ".remote_roms.mounts[\"$system\"].remote_path" "$rd_conf")
+  [[ -z "$remote_path" || "$remote_path" == "null" ]] && {
+    log e "No remote_path configured for $system"
+    return 1
+  }
 
+  # Setup
   remote_roms_generate_rclone_config || return 1
-
-  # Use VFS defaults directly (simpler, no config needed)
-  # VFS cache helps with directory listing but files are copied locally anyway
-  local cache_mode="$REMOTE_ROMS_DEFAULT_VFS_CACHE_MODE"
-  local read_ahead="$REMOTE_ROMS_DEFAULT_VFS_READ_AHEAD"
-  local cache_size="$REMOTE_ROMS_DEFAULT_VFS_CACHE_MAX_SIZE"
-
-
-
-
-  # Create directories
+  local wrapper=$(_remote_roms_ensure_fusermount_wrapper)
   mkdir -p "$system_path" "$remote_visible"
 
-  # Build and log the rclone mount command
-  local rclone_cmd="rclone mount"
-  local rclone_remote="retrodeck-webdav:${remote_path}"
-  local rclone_mount_point="$remote_visible"
+  # Build and execute mount command
+  rclone mount "retrodeck-webdav:${remote_path}" "$remote_visible" \
+    --vfs-cache-mode="$REMOTE_ROMS_DEFAULT_VFS_CACHE_MODE" \
+    --vfs-read-ahead="$REMOTE_ROMS_DEFAULT_VFS_READ_AHEAD" \
+    --vfs-cache-max-size="$REMOTE_ROMS_DEFAULT_VFS_CACHE_MAX_SIZE" \
+    --cache-dir="$system_path/.vfs-cache" \
+    --allow-other --allow-non-empty --daemon \
+    --log-file="$logs_path/rclone-$system.log" \
+    --daemon-fusermount="$wrapper"
 
-  # Ensure we use the fusermount3 wrapper that calls host via flatpak-spawn
-  # The bundled fusermount3 in the sandbox requires D-Bus which isn't available
-  local fusermount_wrapper="${XDG_CONFIG_HOME}/rclone/fusermount3"
-  if [[ -x "$fusermount_wrapper" ]]; then
-    remote_roms_log_debug "mount_system: Using fusermount3 wrapper at $fusermount_wrapper"
-  else
-    # Create wrapper script
-    mkdir -p "${XDG_CONFIG_HOME}/rclone"
-    cat > "$fusermount_wrapper" << 'WRAPPER_EOF'
-#!/bin/sh
-# Fusermount3 wrapper - calls host via flatpak-spawn
-if [ -z "$_FUSE_COMMFD" ]; then
-    FD_ARGS=
-else
-    FD_ARGS="--env=_FUSE_COMMFD=${_FUSE_COMMFD} --forward-fd=${_FUSE_COMMFD}"
-fi
-if [ -e /proc/self/fd/3 ] && [ 3 != "$_FUSE_COMMFD" ]; then
-    FD_ARGS="$FD_ARGS --forward-fd=3"
-fi
-exec flatpak-spawn --host --forward-fd=1 --forward-fd=2 $FD_ARGS fusermount3 "$@"
-WRAPPER_EOF
-    chmod +x "$fusermount_wrapper"
-    remote_roms_log_debug "mount_system: Created fusermount3 wrapper at $fusermount_wrapper"
-  fi
-
-  # Build rclone command arguments array
-  local rclone_args=(
-    --vfs-cache-mode="$cache_mode"
-    --vfs-read-ahead="$read_ahead"
-    --vfs-cache-max-size="$cache_size"
-    --cache-dir="$system_path/.vfs-cache"
-    --allow-other
-    --allow-non-empty
-    --daemon
-    --log-file="$logs_path/rclone-$system.log"
-    --fuse-flag=auto_unmount
-    --fuse-flag=fsname=retrodeck-$system
-  )
-
-  # Set PATH to prioritize our wrapper
-  export PATH="${XDG_CONFIG_HOME}/rclone:$PATH"
-
-  # Log command
-  remote_roms_log_debug "mount_system: rclone mount $rclone_remote -> $rclone_mount_point (cache: $cache_mode, read_ahead: $read_ahead, max_size: $cache_size)"
-
-  # Write to dedicated debug file
-  {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] RCLONE MOUNT COMMAND for $system:"
-    printf '  rclone mount %q %q \n' "$rclone_remote" "$rclone_mount_point"
-    printf '    %s \n' "${rclone_args[@]}"
-    echo ""
-  } >> "$rd_xdg_config_logs_path/rclone_commands.log"
-
-  # Mount remote to visible remote/ folder
-  # rclone runs inside the sandbox with bundled libfuse
-  # fusermount3 wrapper handles unmounting via flatpak-spawn --host
-  local mount_success=false
-
-  # Run rclone mount
-  local rclone_output
-  local rclone_exit_code
-  rclone_output=$(rclone mount "$rclone_remote" "$rclone_mount_point" "${rclone_args[@]}" --daemon 2>&1)
-  rclone_exit_code=$?
-
-  # --daemon returns immediately, so we need to verify the mount actually succeeded
+  # Reuse: Verify mount health and repair if stale (one attempt)
   sleep 1
-  if [[ $rclone_exit_code -eq 0 ]] && mountpoint -q "$rclone_mount_point" 2>/dev/null; then
-    mount_success=true
-    log i "Mounted $system remote to $remote_visible"
-  else
-    # Mount failed - capture error from log file or output
+  if ! remote_roms_check_and_repair_mount "$system"; then
     local error_detail=""
-    if [[ -f "$logs_path/rclone-$system.log" ]]; then
-      error_detail=$(tail -n 5 "$logs_path/rclone-$system.log" 2>/dev/null)
-    fi
-    if [[ -z "$error_detail" && -n "$rclone_output" ]]; then
-      error_detail="$rclone_output"
-    fi
+    [[ -f "$logs_path/rclone-$system.log" ]] && error_detail=$(tail -n 3 "$logs_path/rclone-$system.log" 2>/dev/null)
     log e "Failed to mount $system${error_detail:+: $error_detail}"
-    remote_roms_log_debug "mount_system: $system mount failed (exit: $rclone_exit_code)"
+    remote_roms_log_debug "mount_system: $system mount verification and repair failed"
     return 1
   fi
 
-  # Create QuickResume ROM if setting enabled
-  if [[ "$mount_success" == "true" && $(get_setting_value "$rd_conf" "remote_roms_quickresume" "retrodeck" "options") == "true" ]]; then
+  log i "Mounted $system remote to $remote_visible"
+
+  # Reuse: Create QuickResume if enabled
+  if [[ "$(get_setting_value "$rd_conf" "remote_roms_quickresume" "retrodeck" "options")" == "true" ]]; then
     remote_roms_create_quickresume "$system"
   fi
 
@@ -390,11 +310,12 @@ remote_roms_unmount_system() {
   local mount_point="$roms_path/$system/remote"
 
   if mountpoint -q "$mount_point" 2>/dev/null; then
-    # Use fusermount3 wrapper (calls host via flatpak-spawn)
-    if command -v fusermount3 &> /dev/null && fusermount3 -u "$mount_point" 2>/dev/null; then
+    # Ensure wrapper is available and use it for unmount
+    local fusermount_wrapper=$(_remote_roms_ensure_fusermount_wrapper)
+    if "$fusermount_wrapper" -u "$mount_point" 2>/dev/null; then
       : # success
     elif umount "$mount_point" 2>/dev/null; then
-      : # success
+      : # fallback success
     else
       log w "Failed to unmount $system - all methods failed"
     fi
@@ -402,21 +323,7 @@ remote_roms_unmount_system() {
   fi
 }
 
-remote_roms_mount_all() {
-  # Mount all enabled systems
-  log i "Mounting all enabled remote ROM systems"
 
-  local mounts=$(remote_roms_get_mounts)
-  local count=0
-
-  while IFS= read -r system; do
-    if [[ -n "$system" ]] && remote_roms_mount_system "$system"; then
-      ((count++))
-    fi
-  done < <(echo "$mounts" | jq -r 'to_entries[] | select(.value.enabled == true) | .key')
-
-  log i "Mounted $count systems"
-}
 
 remote_roms_mount_automount_enabled() {
   # Mount only systems with automount=true (called at startup)
@@ -446,16 +353,7 @@ remote_roms_mount_automount_enabled() {
   log i "Auto-mounted $count systems"
 }
 
-remote_roms_unmount_all() {
-  # Unmount all systems
-  log i "Unmounting all remote ROM systems"
 
-  local mounts=$(remote_roms_get_mounts)
-
-  while IFS= read -r system; do
-    [[ -n "$system" ]] && remote_roms_unmount_system "$system"
-  done < <(echo "$mounts" | jq -r 'keys[]')
-}
 
 remote_roms_create_quickresume() {
   # Create 999RepairRemote.zip file for mount repair after Quick Resume
@@ -476,20 +374,22 @@ remote_roms_create_quickresume() {
   fi
 }
 
-remote_roms_check_mount_health() {
+# Internal helper: Check mount health without repairing
+# Use remote_roms_check_and_repair_mount() for public API
+_remote_roms_check_mount_health() {
   # Check if a mount is healthy (responding to I/O)
   # Returns: "healthy", "stale", or "not_mounted"
-  # USAGE: health=$(remote_roms_check_mount_health "$system")
-  
+  # USAGE: health=$(_remote_roms_check_mount_health "$system")
+
   local system="$1"
   local mount_point="$roms_path/$system/remote"
-  
+
   # Check if mountpoint exists
   if ! mountpoint -q "$mount_point" 2>/dev/null; then
     echo "not_mounted"
     return 0
   fi
-  
+
   # Try actual I/O operation with timeout
   if timeout 2 ls "$mount_point" >/dev/null 2>&1; then
     echo "healthy"
@@ -500,11 +400,13 @@ remote_roms_check_mount_health() {
 
 remote_roms_check_and_repair_mount() {
   # Check mount health and repair if stale (one attempt)
+  # This is the PRIMARY public API for mount health checks.
+  # It both diagnoses AND fixes issues in one call.
   # Returns: 0 if healthy or repaired, 1 if failed
   # USAGE: if remote_roms_check_and_repair_mount "$system"; then ...
 
   local system="$1"
-  local health=$(remote_roms_check_mount_health "$system")
+  local health=$(_remote_roms_check_mount_health "$system")
 
   if [[ "$health" == "healthy" ]]; then
     return 0
@@ -547,19 +449,6 @@ remote_roms_repair_all_mounts() {
 
   log i "Repaired $repaired systems"
   echo "$repaired"
-}
-
-remote_roms_is_mounted() {
-  # Check if system is mounted
-  # USAGE: if [[ $(remote_roms_is_mounted "$system") == "true" ]]; then ...
-
-  local system="$1"
-  local mount_point="$roms_path/$system/remote"
-  if mountpoint -q "$mount_point" 2>/dev/null; then
-    echo "true"
-  else
-    echo "false"
-  fi
 }
 
 remote_roms_get_available_systems() {
@@ -657,21 +546,20 @@ remote_roms_download_rom() {
 # Utility Functions
 # ============================================
 
-remote_roms_check_rclone() {
-  # Check if rclone is available
-  # Returns: "true" or "false"
-  if command -v rclone &> /dev/null; then
-    echo "true"
-  else
-    echo "false"
-  fi
-}
 
 remote_roms_check_fuse() {
-  # Check if FUSE is available (fusermount3 or fusermount)
+  # Check if FUSE is available via wrapper or system binaries
   # USAGE: remote_roms_check_fuse
   # Returns: "fuse3", "fuse2", or "none"
 
+  # Check if wrapper exists or can be created
+  local fusermount_wrapper="${XDG_CONFIG_HOME}/rclone/fusermount3"
+  if [[ -x "$fusermount_wrapper" ]] || [[ -f "/app/libexec/fusermount-wrapper.sh" ]]; then
+    echo "fuse3"
+    return 0
+  fi
+
+  # Check for system fusermount3 (via flatpak-spawn or host)
   if command -v fusermount3 &> /dev/null; then
     echo "fuse3"
     return 0
@@ -731,3 +619,51 @@ remote_roms_diagnose_fuse() {
   echo "Diagnosis complete. See: $diag_log"
   echo "$diag_log"
 }
+
+
+
+# remote_roms_check_rclone() {
+#   # Check if rclone is available
+#   # Returns: "true" or "false"
+#   if command -v rclone &> /dev/null; then
+#     echo "true"
+#   else
+#     echo "false"
+#   fi
+# }
+
+# remote_roms_mount_all() {
+#   # Mount all enabled systems
+#   log i "Mounting all enabled remote ROM systems"
+
+#   local mounts=$(remote_roms_get_mounts)
+#   local count=0
+
+#   while IFS= read -r system; do
+#     if [[ -n "$system" ]] && remote_roms_mount_system "$system"; then
+#       ((count++))
+#     fi
+#   done < <(echo "$mounts" | jq -r 'to_entries[] | select(.value.enabled == true) | .key')
+
+#   log i "Mounted $count systems"
+# }
+
+# remote_roms_unmount_all() {
+#   # Unmount all systems
+#   log i "Unmounting all remote ROM systems"
+
+#   local mounts=$(remote_roms_get_mounts)
+
+#   while IFS= read -r system; do
+#     [[ -n "$system" ]] && remote_roms_unmount_system "$system"
+#   done < <(echo "$mounts" | jq -r 'keys[]')
+# }
+
+# remote_roms_toggle_mount() {
+#   # Enable/disable a mount
+#   # USAGE: remote_roms_toggle_mount "$system" "true|false"
+
+#   local system="$1"
+#   local enabled="$2"
+#   jq --arg s "$system" --argjson e "$enabled" '.remote_roms.mounts[$s].enabled = $e' "$rd_conf" > "$rd_conf.tmp" && mv "$rd_conf.tmp" "$rd_conf"
+# }

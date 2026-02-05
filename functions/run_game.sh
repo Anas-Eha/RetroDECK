@@ -85,7 +85,7 @@ run_game() {
         # Repair all remote mounts
         log i "REMOTE_ROMS: Repairing all remote mounts..."
         local repaired_count=$(remote_roms_repair_all_mounts)
-        
+        q
         # Show success dialog
         if [[ "$repaired_count" -gt 0 ]]; then
             rd_zenity --icon-name=net.retrodeck.retrodeck --info --no-wrap \
