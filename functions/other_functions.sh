@@ -1184,11 +1184,9 @@ start_retrodeck() {
   splash_screen # Check if today has a surprise splashscreen and load it if so
   prepare_component "startup" "all"
 
-  # Auto-mount remote ROMs if enabled (config-driven like portmaster_show)
-  if [[ $(get_setting_value "$rd_conf" "remote_roms_automount" "retrodeck" "options") != "false" ]]; then
-    if command -v remote_roms_mount_automount_enabled &> /dev/null; then
-      remote_roms_mount_automount_enabled
-    fi
+  # Auto-refresh remote ROM listings for systems with auto_refresh enabled
+  if command -v remote_roms_startup_auto_refresh &> /dev/null; then
+    remote_roms_startup_auto_refresh
   fi
 
   log d "Checking if PortMaster should be shown"

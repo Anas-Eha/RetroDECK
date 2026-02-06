@@ -1266,15 +1266,15 @@ configurator_remote_dialog() {
   # Initialize config if needed
   remote_roms_init_config
 
-  local global_enabled=$(remote_roms_get_setting "global_enabled")
+  local remote_rom_enabled=$(remote_roms_get_setting "remote_rom_enabled")
   local status_text="Disabled"
-  [[ "$global_enabled" == "true" ]] && status_text="Enabled"
+  [[ "$remote_rom_enabled" == "true" ]] && status_text="Enabled"
 
   local menu_options=(
-    "Sync Systems" "Auto-discover and enable systems from WebDAV"
+    "Sync Systems" "Auto-discover and enable systems from remote server"
     "Manage Systems" "View and configure individual remote systems"
-    "Connection Settings" "Configure WebDAV server URL, username and password"
-    "Test Connection" "Test the WebDAV connection"
+    "Connection Settings" "Configure remote server URL, username and password"
+    "Test Connection" "Test the remote server connection"
   )
 
   choice=$(rd_zenity --list \
@@ -1312,19 +1312,20 @@ configurator_remote_dialog() {
 }
 
 configurator_remote_roms_connection_dialog() {
-  # Dialog for configuring WebDAV connection settings
+  # Dialog for configuring remote server connection settings
+  # Currently supports WebDAV protocol
   # USAGE: configurator_remote_roms_connection_dialog
 
   log i "Opening Remote ROMs connection dialog"
 
-  local current_url=$(remote_roms_get_setting "webdav_url")
-  local current_user=$(remote_roms_get_setting "webdav_user")
+  local current_url=$(remote_roms_get_setting "remote_url")
+  local current_user=$(remote_roms_get_remote_creds user)
 
   local form_result=$(rd_zenity --forms \
-    --title "RetroDECK Configurator - WebDAV Connection" \
+    --title "RetroDECK Configurator - Remote Connection" \
     --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
-    --text="Configure your WebDAV server connection settings.\n\n<span foreground='$purple'><b>The source folder should contain subfolders like /gba, /snes, /ps2 etc.</b></span>" \
-    --add-entry="WebDAV URL (e.g., https://myserver.com/webdav):$current_url" \
+    --text="Configure your remote server connection settings.\n\n<span foreground='$purple'><b>The source folder should contain subfolders like /gba, /snes, /ps2 etc.</b></span>" \
+    --add-entry="Server URL (e.g., https://myserver.com/webdav ):$current_url" \
     --add-entry="Username:$current_user" \
     --add-password="Password:")
 
@@ -1347,9 +1348,9 @@ configurator_remote_roms_connection_dialog() {
     return
   fi
 
-  remote_roms_save_webdav_config "$url" "$user" "$pass"
+  remote_roms_save_connection_config "$url" "$user" "$pass"
 
-  configurator_generic_dialog "RetroDECK Configurator - Settings Saved" "<span foreground='$purple'><b>WebDAV connection settings saved.</b></span>\n\nYou can now test the connection or configure mounts."
+  configurator_generic_dialog "RetroDECK Configurator - Settings Saved" "<span foreground='$purple'><b>Remote connection settings saved.</b></span>\n\nYou can now test the connection or configure mounts."
   configurator_remote_dialog
 }
 
@@ -1377,8 +1378,8 @@ configurator_remote_roms_discover_dialog() {
 }
 
 configurator_remote_roms_test_dialog() {
-  # Dialog to test WebDAV connection
-  log i "Testing WebDAV connection"
+  # Dialog to test remote server connection
+  log i "Testing remote connection"
 
   (
     echo "0"
@@ -1390,7 +1391,7 @@ configurator_remote_roms_test_dialog() {
     echo "$result" > /tmp/remote_roms_test_result
   ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
     --title "RetroDECK - Testing Connection" \
-    --text="Testing WebDAV connection..." \
+    --text="Testing remote server connection..." \
     --width=400 --height=100
 
   local result=$(cat /tmp/remote_roms_test_result 2>/dev/null)
@@ -1398,16 +1399,16 @@ configurator_remote_roms_test_dialog() {
 
   case "$result" in
     "connected")
-      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection successful!</b></span>\n\nYour WebDAV server is reachable and credentials are valid."
+      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection successful!</b></span>\n\nYour remote server is reachable and credentials are valid."
       ;;
     "missing_config")
-      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Configuration incomplete.</b></span>\n\nPlease set the WebDAV URL, username, and password first."
+      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Configuration incomplete.</b></span>\n\nPlease set the remote URL, username, and password first."
       ;;
     "rclone_not_found")
-      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>rclone not found.</b></span>\n\nrclone is required for WebDAV connections. Please ensure it's installed."
+      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>rclone not found.</b></span>\n\nrclone is required for remote connections. Please ensure it's installed."
       ;;
     "connection_failed"|*)
-      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check:\n• WebDAV URL is correct\n• Username and password are correct\n• Server is accessible\n• Network connection is working"
+      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check:\n• remote URL is correct\n• Username and password are correct\n• Server is accessible\n• Network connection is working"
       ;;
   esac
 
@@ -1447,7 +1448,7 @@ configurator_remote_roms_manage_system_dialog() {
   else
     # Virtual Browser actions
     menu_options+=("Browse ROMs" "Open virtual browser to view and download ROMs")
-    menu_options+=("Refresh Cache" "Update ROM listing from WebDAV server")
+    menu_options+=("Refresh Cache" "Update ROM listing from remote server")
     
     if [[ "$auto_refresh" == "true" ]]; then
       menu_options+=("Disable Auto-refresh" "Don't auto-refresh cache on startup")
@@ -1524,7 +1525,7 @@ configurator_remote_roms_manage_system_dialog() {
       ;;
     "Disable Auto-refresh")
       remote_roms_set_system_auto_refresh "$system" "false"
-      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-refresh disabled for $system.</b></span>\n\nYou'll need to refresh the cache manually."
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-refresh disabled for $system.</b></span>\n\nYou'll need to refresh Rom listings manually."
       refresh=true
       ;;
     "Remove Configuration")
@@ -1546,7 +1547,7 @@ configurator_remote_roms_manage_system_dialog() {
 
 configurator_remote_roms_refresh_dialog() {
   # Combined discovery + sync dialog for Remote ROMs
-  # Discovers systems on WebDAV, lets user select which to enable, then refreshes all
+  # Discovers systems on remote server, lets user select which to enable, then refreshes all
   # USAGE: configurator_remote_roms_refresh_dialog
 
   log i "Opening Sync Systems dialog (discovery + refresh)"
@@ -1556,31 +1557,31 @@ configurator_remote_roms_refresh_dialog() {
   if [[ "$conn_status" != "connected" ]]; then
     case "$conn_status" in
       "missing_config")
-        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>Configuration incomplete.</b></span>\n\nPlease configure WebDAV connection settings first."
+        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>Configuration incomplete.</b></span>\n\nPlease configure remote connection settings first."
         ;;
       "rclone_not_found")
-        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>rclone not found.</b></span>\n\nrclone is required for WebDAV connections."
+        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>rclone not found.</b></span>\n\nrclone is required for remote connections."
         ;;
       *)
-        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check your WebDAV settings and try again."
+        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check your remote settings and try again."
         ;;
     esac
     configurator_remote_dialog
     return
   fi
 
-  # Step 1: Discover systems on WebDAV server
+  # Step 1: Discover systems on Remote server
   local discovered="{}"
   (
     echo "10"
-    echo "# Scanning WebDAV server for systems..."
+    echo "# Scanning Remote server for systems..."
     discovered=$(remote_roms_discover_systems)
     echo "$discovered" > /tmp/remote_roms_discovered
     echo "50"
     echo "# Discovery complete"
   ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
     --title "RetroDECK - Discovering Systems" \
-    --text="Searching for ROM systems on your WebDAV server..." \
+    --text="Searching for ROM systems on your Remote server..." \
     --width=400 --height=100
 
   discovered=$(cat /tmp/remote_roms_discovered 2>/dev/null || echo "{}")
@@ -1589,7 +1590,7 @@ configurator_remote_roms_refresh_dialog() {
   local discovered_count=$(echo "$discovered" | jq 'length')
 
   if [[ "$discovered_count" -eq 0 ]]; then
-    configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>No systems found on WebDAV server.</b></span>\n\nMake sure your server has folders like /gba, /snes, /ps2 etc."
+    configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>No systems found on Remote server.</b></span>\n\nMake sure your server has folders like /gba, /snes, /ps2 etc."
     configurator_remote_dialog
     return
   fi
@@ -1610,7 +1611,7 @@ configurator_remote_roms_refresh_dialog() {
   # Step 3: Show selection dialog
   local selected_systems=$(rd_zenity --list \
     --title "RetroDECK Configurator - Sync Systems" \
-    --text="Found <b>$discovered_count</b> system(s) on your WebDAV server.\n\nSelect systems to enable for remote ROM access:" \
+    --text="Found <b>$discovered_count</b> system(s) on your Remote server.\n\nSelect systems to enable for remote ROM access:" \
     --checklist \
     --separator="^" \
     --hide-column=2 --print-column=2 \

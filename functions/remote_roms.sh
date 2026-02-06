@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Remote ROMs Functions
-# Provides WebDAV-based remote ROM browsing and downloading
+# Provides remote ROM browsing and downloading via WebDAV (extensible for future protocols)
 # Uses rclone for all remote operations
 
 # ============================================
@@ -11,6 +11,8 @@
 readonly REMOTE_ROMS_CACHE_DIR="${rd_cache}/remote_roms"
 readonly REMOTE_ROMS_LISTING_FILE="listing.json"
 readonly REMOTE_ROMS_GAMELIST_FILE="gamelist.xml"
+readonly REMOTE_ROMS_RCLONE_CONFIG_DIR="${XDG_CONFIG_HOME}/retrodeck/rclone"
+readonly REMOTE_ROMS_RCLONE_CONFIG_FILE="${REMOTE_ROMS_RCLONE_CONFIG_DIR}/rclone.conf"
 
 # UI/UX Constants
 readonly REMOTE_ROMS_ALPHABETICAL_BUCKET_THRESHOLD=200  # Games before using A-Z buckets
@@ -47,12 +49,6 @@ _remote_roms_cleanup_temp_files() {
   _REMOTE_ROMS_TEMP_FILES=()
 }
 
-_remote_roms_register_temp_file() {
-  # Register a temporary file for cleanup
-  local temp_file="$1"
-  [[ -n "$temp_file" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_file")
-}
-
 trap _remote_roms_cleanup_temp_files EXIT INT TERM
 
 # ============================================
@@ -71,18 +67,18 @@ _remote_roms_validate_system_name() {
   return 0
 }
 
-_remote_roms_validate_webdav_url() {
-  # Validate WebDAV URL format
+_remote_roms_validate_remote_url() {
+  # Validate remote server URL format (currently supports WebDAV URLs)
   local url="$1"
   
   if [[ -z "$url" ]]; then
-    log e "WebDAV URL cannot be empty"
+    log e "Server URL cannot be empty"
     return 1
   fi
   
   # Basic URL validation: must start with http:// or https://
   if [[ ! "$url" =~ ^https?:// ]]; then
-    log e "Invalid WebDAV URL: '$url' (must start with http:// or https://)"
+    log e "Invalid server URL: '$url' (must start with http:// or https://)"
     return 1
   fi
   
@@ -135,11 +131,6 @@ _remote_roms_lock_config() {
   return 0
 }
 
-_remote_roms_unlock_config() {
-  # Release lock on config file
-  exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
-}
-
 # ============================================
 # Internal Helper Functions
 # ============================================
@@ -149,35 +140,6 @@ remote_roms_log_debug() {
   if [[ "${REMOTE_ROMS_DEBUG:-0}" == "1" ]]; then
     log d "$1"
   fi
-}
-
-_remote_roms_zenity_wrapper() {
-  # Wrapper for zenity that captures errors for debug logging
-  # All zenity stderr is logged when REMOTE_ROMS_DEBUG=1
-  # USAGE: output=$(_remote_roms_zenity_wrapper --list --title "Foo" ...)
-
-  local output
-  local err_output
-  err_output=$(mktemp)
-  _remote_roms_register_temp_file "$err_output"
-
-  output=$(zenity "$@" 2>"$err_output")
-  local exit_code=$?
-
-  if [[ "${REMOTE_ROMS_DEBUG:-0}" == "1" ]]; then
-    local err_content
-    err_content=$(cat "$err_output" 2>/dev/null)
-    if [[ -n "$err_content" ]]; then
-      log d "zenity stderr: $err_content"
-    fi
-  fi
-
-  # Remove from tracking and cleanup
-  _REMOTE_ROMS_TEMP_FILES=("${_REMOTE_ROMS_TEMP_FILES[@]/#$err_output/}")
-  rm -f "$err_output"
-
-  echo "$output"
-  return $exit_code
 }
 
 _remote_roms_write_rclone_config() {
@@ -225,9 +187,10 @@ remote_roms_init_config() {
   if ! jq -e '.remote_roms' "$rd_conf" > /dev/null 2>&1; then
     log i "Creating remote_roms configuration"
     local default_config='{
-      "webdav_url": "",
+      "remote_protocol": "webdav",
+      "remote_url": "",
       "systems": {},
-      "global_enabled": false
+      "remote_rom_enabled": false
     }'
     
     if ! jq --argjson config "$default_config" '.remote_roms = $config' "$rd_conf" > "$rd_conf.tmp"; then
@@ -283,7 +246,7 @@ remote_roms_set_setting() {
     if ! jq --arg val "$2" ".remote_roms.$1 = \$val" "$rd_conf" > "$rd_conf.tmp"; then
       log e "Failed to update setting $1"
       rm -f "$rd_conf.tmp"
-      _remote_roms_unlock_config
+      exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
       return 1
     fi
   else
@@ -293,7 +256,7 @@ remote_roms_set_setting() {
     local value="$3"
     
     if ! _remote_roms_validate_system_name "$system"; then
-      _remote_roms_unlock_config
+      exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
       return 1
     fi
     
@@ -301,7 +264,7 @@ remote_roms_set_setting() {
       '.remote_roms.systems[$s][$p] = $v' "$rd_conf" > "$rd_conf.tmp"; then
       log e "Failed to update setting $system.$property"
       rm -f "$rd_conf.tmp"
-      _remote_roms_unlock_config
+      exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
       return 1
     fi
   fi
@@ -309,33 +272,32 @@ remote_roms_set_setting() {
   if ! mv "$rd_conf.tmp" "$rd_conf"; then
     log e "Failed to commit config changes"
     rm -f "$rd_conf.tmp"
-    _remote_roms_unlock_config
+    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
     return 1
   fi
   
-  _remote_roms_unlock_config
+  exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
   return 0
 }
 
-remote_roms_get_webdav_creds() {
-  # Get WebDAV credentials from rclone.conf
-  # USAGE: eval $(remote_roms_get_webdav_creds)  # sets $url, $user, $pass
-  # OR: local url=$(remote_roms_get_webdav_creds url)
+remote_roms_get_remote_creds() {
+  # Get remote credentials from rclone.conf (protocol-agnostic)
+  # USAGE: eval $(remote_roms_get_remote_creds)  # sets $url, $user, $pass
+  # OR: local url=$(remote_roms_get_remote_creds url)
   # NOTE: Uses base64 encoding to safely handle special characters in credentials
 
   local field="${1:-all}"
   local url=""
   local user=""
   local pass=""
-  local rclone_conf="${XDG_CONFIG_HOME:-$HOME/.config}/rclone/rclone.conf"
 
-  # Get URL from JSON config
-  url=$(remote_roms_get_setting "webdav_url")
+  # Get URL from JSON config (generic key for future protocol support)
+  url=$(remote_roms_get_setting "remote_url")
 
-  # Get credentials from rclone.conf if it exists
-  if [[ -f "$rclone_conf" ]]; then
-    user=$(awk -F' = ' '/^\[retrodeck-webdav\]/{found=1} found && /^user = /{print $2; found=0}' "$rclone_conf")
-    pass=$(awk -F' = ' '/^\[retrodeck-webdav\]/{found=1} found && /^pass = /{print $2; found=0}' "$rclone_conf")
+  # Get credentials from RetroDECK's isolated rclone.conf if it exists
+  if [[ -f "$REMOTE_ROMS_RCLONE_CONFIG_FILE" ]]; then
+    user=$(awk -F' = ' '/^\[retrodeck-remote\]/{found=1} found && /^user = /{print $2; found=0}' "$REMOTE_ROMS_RCLONE_CONFIG_FILE")
+    pass=$(awk -F' = ' '/^\[retrodeck-remote\]/{found=1} found && /^pass = /{print $2; found=0}' "$REMOTE_ROMS_RCLONE_CONFIG_FILE")
   fi
 
   case "$field" in
@@ -346,10 +308,11 @@ remote_roms_get_webdav_creds() {
   esac
 }
 
-remote_roms_save_webdav_config() {
-  # Save WebDAV connection settings
+remote_roms_save_connection_config() {
+  # Save remote connection settings (protocol-agnostic)
   # URL is saved to JSON, credentials are saved to rclone.conf only
-  # USAGE: remote_roms_save_webdav_config "$url" "$user" "$pass"
+  # Currently supports: webdav
+  # USAGE: remote_roms_save_connection_config "$url" "$user" "$pass"
   # Returns: 0 on success, 1 on failure
 
   local url="$1"
@@ -357,41 +320,41 @@ remote_roms_save_webdav_config() {
   local pass="$3"
   
   # Validate inputs
-  if ! _remote_roms_validate_webdav_url "$url"; then
+  if ! _remote_roms_validate_remote_url "$url"; then
     return 1
   fi
   
   if [[ -z "$user" ]]; then
-    log e "WebDAV username cannot be empty"
+    log e "Username cannot be empty"
     return 1
   fi
   
   # Save URL to JSON config only (no credentials)
-  remote_roms_set_setting "webdav_url" "$url" || return 1
+  remote_roms_set_setting "remote_url" "$url" || return 1
+  remote_roms_set_setting "remote_protocol" "webdav" || return 1
   
-  # Save credentials to rclone.conf
-  local rclone_dir="${XDG_CONFIG_HOME:-$HOME/.config}/rclone"
-  mkdir -p "$rclone_dir" || {
-    log e "Failed to create rclone directory"
+  # Save credentials to RetroDECK's isolated rclone config directory
+  mkdir -p "$REMOTE_ROMS_RCLONE_CONFIG_DIR" || {
+    log e "Failed to create rclone directory at $REMOTE_ROMS_RCLONE_CONFIG_DIR"
     return 1
   }
-  
-  if ! _remote_roms_write_rclone_config "$rclone_dir/rclone.conf" "retrodeck-webdav" "$url" "$user" "$pass"; then
+
+  if ! _remote_roms_write_rclone_config "$REMOTE_ROMS_RCLONE_CONFIG_FILE" "retrodeck-remote" "$url" "$user" "$pass"; then
     log e "Failed to write rclone config"
     return 1
   fi
   
-  log i "WebDAV configuration saved"
+  log i "Remote configuration saved"
   return 0
 }
 
 remote_roms_test_connection() {
-  # Test WebDAV connection
+  # Test remote server connection
   # USAGE: result=$(remote_roms_test_connection)
   # Returns: "connected", "missing_config", "rclone_not_found", or "connection_failed"
 
   # Decode base64-encoded credentials to safely handle special characters
-  eval $(remote_roms_get_webdav_creds)
+  eval $(remote_roms_get_remote_creds)
   url=$(echo "$url" | base64 -d)
   user=$(echo "$user" | base64 -d)
   pass=$(echo "$pass" | base64 -d)
@@ -432,7 +395,7 @@ remote_roms_test_connection() {
     return 0
   else
     # Log the actual error for debugging
-    log e "WebDAV connection test failed: $rclone_output"
+    log e "Connection test failed: $rclone_output"
     remote_roms_log_debug "rclone exit code: $rclone_exit_code"
     remote_roms_log_debug "rclone output: $rclone_output"
     echo "connection_failed"
@@ -475,26 +438,26 @@ remote_roms_add_system() {
       "remote_path": $remote_path,
       "enabled": true
     }') || {
-    _remote_roms_unlock_config
+    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
     log e "Failed to create system object"
     return 1
   }
 
   if ! jq --arg system "$system" --argjson obj "$system_obj" '.remote_roms.systems[$system] = $obj' "$rd_conf" > "$rd_conf.tmp"; then
-    _remote_roms_unlock_config
+    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
     rm -f "$rd_conf.tmp"
     log e "Failed to add system $system"
     return 1
   fi
 
   if ! mv "$rd_conf.tmp" "$rd_conf"; then
-    _remote_roms_unlock_config
+    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
     rm -f "$rd_conf.tmp"
     log e "Failed to commit system addition"
     return 1
   fi
 
-  _remote_roms_unlock_config
+  exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
   log i "Added remote ROM system: $system"
   return 0
 }
@@ -522,20 +485,20 @@ remote_roms_remove_system() {
   fi
 
   if ! jq --arg s "$system" 'del(.remote_roms.systems[$s])' "$rd_conf" > "$rd_conf.tmp"; then
-    _remote_roms_unlock_config
+    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
     rm -f "$rd_conf.tmp"
     log e "Failed to remove system $system"
     return 1
   fi
 
   if ! mv "$rd_conf.tmp" "$rd_conf"; then
-    _remote_roms_unlock_config
+    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
     rm -f "$rd_conf.tmp"
     log e "Failed to commit system removal"
     return 1
   fi
 
-  _remote_roms_unlock_config
+  exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
   log i "Removed remote ROM system: $system"
   return 0
 }
@@ -578,12 +541,12 @@ remote_roms_get_available_systems() {
 # ============================================
 
 remote_roms_discover_systems() {
-  # Auto-discover systems on WebDAV server
+  # Auto-discover systems on remote server
   # USAGE: discovered=$(remote_roms_discover_systems)
   # Returns: 0 on success (JSON object), 1 on failure (empty JSON)
 
   # Decode base64-encoded credentials to safely handle special characters
-  eval $(remote_roms_get_webdav_creds)
+  eval $(remote_roms_get_remote_creds)
   url=$(echo "$url" | base64 -d)
   user=$(echo "$user" | base64 -d)
   pass=$(echo "$pass" | base64 -d)
@@ -650,7 +613,7 @@ remote_roms_generate_rclone_config() {
   # USAGE: remote_roms_generate_rclone_config
 
   # Decode base64-encoded credentials to safely handle special characters
-  eval $(remote_roms_get_webdav_creds)
+  eval $(remote_roms_get_remote_creds)
   url=$(echo "$url" | base64 -d)
   user=$(echo "$user" | base64 -d)
   pass=$(echo "$pass" | base64 -d)
@@ -665,13 +628,12 @@ remote_roms_generate_rclone_config() {
     return 1
   fi
 
-  local rclone_dir="$XDG_CONFIG_HOME/rclone"
-  mkdir -p "$rclone_dir" || {
-    log e "Failed to create rclone directory"
+  mkdir -p "$REMOTE_ROMS_RCLONE_CONFIG_DIR" || {
+    log e "Failed to create rclone directory at $REMOTE_ROMS_RCLONE_CONFIG_DIR"
     return 1
   }
 
-  if ! _remote_roms_write_rclone_config "$rclone_dir/rclone.conf" "retrodeck-webdav" "$url" "$user" "$pass"; then
+  if ! _remote_roms_write_rclone_config "$REMOTE_ROMS_RCLONE_CONFIG_FILE" "retrodeck-remote" "$url" "$user" "$pass"; then
     log e "Failed to write rclone config"
     return 1
   fi
@@ -706,9 +668,9 @@ remote_roms_fetch_gamelist() {
   # Try to fetch gamelist.xml from remote
   local temp_file
   temp_file=$(mktemp) || return 1
-  _remote_roms_register_temp_file "$temp_file"
+  [[ -n "$temp_file" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_file")
 
-  if rclone copyto "retrodeck-webdav:${remote_path}/gamelist.xml" "$temp_file" 2>/dev/null; then
+  if rclone copyto "retrodeck-remote:${remote_path}/gamelist.xml" "$temp_file" 2>/dev/null; then
     mv "$temp_file" "$gamelist_path" || return 1
     remote_roms_log_debug "fetch_gamelist: downloaded gamelist.xml for $system"
     # Remove from tracking since it's been moved (exact match only)
@@ -807,9 +769,9 @@ remote_roms_build_listing_from_directory() {
   # Fetch listing with rclone lsjson
   local temp_file
   temp_file=$(mktemp) || return 1
-  _remote_roms_register_temp_file "$temp_file"
+  [[ -n "$temp_file" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_file")
 
-  if rclone lsjson "retrodeck-webdav:${remote_path}" --recursive > "$temp_file" 2>/dev/null; then
+  if rclone lsjson "retrodeck-remote:${remote_path}" --recursive > "$temp_file" 2>/dev/null; then
     # Filter only files and format
     local listing=$(jq '[.[] | select(.IsDir == false) | {
       "name": .Name,
@@ -897,35 +859,6 @@ remote_roms_ensure_listing() {
   echo "$listing"
 }
 
-remote_roms_refresh_all_systems() {
-  # Refresh ROM listings for all configured systems
-  # USAGE: count=$(remote_roms_refresh_all_systems)
-  # Returns: Number of successfully refreshed systems
-
-  log i "Refreshing all remote ROM listings"
-
-  local systems=$(remote_roms_get_setting "systems")
-  local refreshed=0
-  local total=$(echo "$systems" | jq 'length')
-
-  if [[ "$total" -eq 0 ]]; then
-    log w "No systems configured for remote ROMs"
-    echo "0"
-    return 0
-  fi
-
-  while IFS= read -r system; do
-    [[ -z "$system" ]] && continue
-
-    if remote_roms_refresh_system_listing "$system"; then
-      ((refreshed++))
-    fi
-  done < <(echo "$systems" | jq -r 'keys[]')
-
-  log i "Refreshed $refreshed/$total systems"
-  echo "$refreshed"
-}
-
 # ============================================
 # ROM Download Functions
 # ============================================
@@ -963,12 +896,12 @@ remote_roms_download_rom() {
     log e "Failed to create directory for $rom_name"
     return 1
   }
-  _remote_roms_register_temp_file "$temp_file"
+  [[ -n "$temp_file" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_file")
 
   log i "Downloading $rom_name from remote..."
 
   # Use rclone copyto with timeouts
-  if rclone copyto "retrodeck-webdav:${remote_path}/${rom_name}" "$temp_file" \
+  if rclone copyto "retrodeck-remote:${remote_path}/${rom_name}" "$temp_file" \
     --progress --contimeout ${REMOTE_ROMS_DOWNLOAD_CONNECT_TIMEOUT}s --timeout ${REMOTE_ROMS_DOWNLOAD_TIMEOUT}s 2>/dev/null; then
     if mv "$temp_file" "$local_path"; then
       log i "Downloaded $rom_name successfully"
@@ -1139,9 +1072,9 @@ remote_roms_virtual_browser_menu() {
   fi
 
   # Check if system is enabled (global + system setting)
-  local global_enabled=$(remote_roms_get_setting "global_enabled")
+  local remote_rom_enabled=$(remote_roms_get_setting "remote_rom_enabled")
   local system_enabled=$(remote_roms_get_setting "$system" "enabled")
-  if [[ "$global_enabled" != "true" || "$system_enabled" != "true" ]]; then
+  if [[ "$remote_rom_enabled" != "true" || "$system_enabled" != "true" ]]; then
     log w "Remote ROMs not enabled for $system"
     return 1
   fi
@@ -1223,14 +1156,14 @@ remote_roms_create_esde_integration() {
       # Add entry before closing </gameList> tag
       local temp_gamelist
       temp_gamelist=$(mktemp) || return 1
-      _remote_roms_register_temp_file "$temp_gamelist"
+      [[ -n "$temp_gamelist" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_gamelist")
 
       if awk '
         /<\/gameList>/ {
           print "  <game>"
           print "    <path>./remote/Browse Remote ROMs.remote_trigger</path>"
           print "    <name>📡 Browse Remote ROMs</name>"
-          print "    <desc>Browse and download ROMs from your WebDAV server</desc>"
+          print "    <desc>Browse and download ROMs from your remote server</desc>"
           print "    <image></image>"
           print "    <thumbnail></thumbnail>"
           print "  </game>"
@@ -1281,7 +1214,7 @@ remote_roms_remove_esde_integration() {
   if [[ -f "$gamelist_path" ]] && grep -q "Browse Remote ROMs" "$gamelist_path" 2>/dev/null; then
     local temp_gamelist
     temp_gamelist=$(mktemp) || return 1
-    _remote_roms_register_temp_file "$temp_gamelist"
+    [[ -n "$temp_gamelist" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_gamelist")
 
     if awk '
       /<game>/ { in_game=1; game_block=$0; next }
@@ -1333,4 +1266,30 @@ remote_roms_set_system_auto_refresh() {
   fi
   
   remote_roms_set_setting "$system" "auto_refresh" "$value"
+}
+
+remote_roms_startup_auto_refresh() {
+  # Startup hook: Auto-refresh ROM listings for systems with auto_refresh=true
+  # Runs silently in background during startup
+  # USAGE: remote_roms_startup_auto_refresh
+
+  # Check if remote ROMs is globally enabled
+  local remote_rom_enabled=$(remote_roms_get_setting "remote_rom_enabled")
+  [[ "$remote_rom_enabled" != "true" ]] && return 0
+
+  # Get all systems with auto_refresh enabled
+  local systems=$(remote_roms_get_setting "systems")
+  local auto_refresh_systems=$(echo "$systems" | jq -r '[.[] | select(.auto_refresh == true) | .system] | .[]')
+  
+  [[ -z "$auto_refresh_systems" ]] && return 0
+
+  log i "Auto-refreshing remote ROM listings for enabled systems"
+  
+  while IFS= read -r system; do
+    [[ -z "$system" ]] && continue
+    log d "Auto-refreshing $system..."
+    remote_roms_refresh_system_listing "$system" &
+  done <<< "$auto_refresh_systems"
+  
+  # Don't wait for background jobs - let them complete asynchronously
 }
