@@ -16,10 +16,6 @@ readonly REMOTE_ROMS_GAMELIST_FILE="gamelist.xml"
 readonly REMOTE_ROMS_RCLONE_CONFIG_DIR="${XDG_CONFIG_HOME}/retrodeck/rclone"
 readonly REMOTE_ROMS_RCLONE_CONFIG_FILE="${REMOTE_ROMS_RCLONE_CONFIG_DIR}/rclone.conf"
 
-# UI/UX Constants
-readonly REMOTE_ROMS_ALPHABETICAL_BUCKET_THRESHOLD=200  # Games before using A-Z buckets
-readonly REMOTE_ROMS_LATEST_GAMES_COUNT=50              # Number of recent games to show
-
 # File Locking
 readonly _REMOTE_ROMS_LOCK_FD=3
 
@@ -40,13 +36,13 @@ _REMOTE_ROMS_TEMP_FILES=()
 _remote_roms_cleanup_temp_files() {
   # Cleanup function to ensure all temporary files are removed on any exit
   # Handles: normal exit, errors, signals (INT, TERM)
-  
+
   [[ -n "$_REMOTE_ROMS_TEMP_RCLONE_CONFIG" ]] && rm -f "$_REMOTE_ROMS_TEMP_RCLONE_CONFIG"
-  
+
   for file in "${_REMOTE_ROMS_TEMP_FILES[@]}"; do
     [[ -n "$file" ]] && rm -f "$file"
   done
-  
+
   _REMOTE_ROMS_TEMP_RCLONE_CONFIG=""
   _REMOTE_ROMS_TEMP_FILES=()
 }
@@ -60,7 +56,7 @@ trap _remote_roms_cleanup_temp_files EXIT INT TERM
 _remote_roms_validate_system_name() {
   # Validate system name format (prevent injection/traversal)
   local system="$1"
-  
+
   # Allow only alphanumeric, underscore, hyphen
   if [[ ! "$system" =~ ^[a-zA-Z0-9_-]+$ ]]; then
     log e "Invalid system name: '$system' (alphanumeric, hyphen, underscore only)"
@@ -72,42 +68,42 @@ _remote_roms_validate_system_name() {
 _remote_roms_validate_remote_url() {
   # Validate remote server URL format (currently supports WebDAV URLs)
   local url="$1"
-  
+
   if [[ -z "$url" ]]; then
     log e "Server URL cannot be empty"
     return 1
   fi
-  
+
   # Basic URL validation: must start with http:// or https://
   if [[ ! "$url" =~ ^https?:// ]]; then
     log e "Invalid server URL: '$url' (must start with http:// or https://)"
     return 1
   fi
-  
+
   return 0
 }
 
 _remote_roms_validate_remote_path() {
   # Validate remote path (prevent directory traversal)
   local path="$1"
-  
+
   if [[ -z "$path" ]]; then
     log e "Remote path cannot be empty"
     return 1
   fi
-  
+
   # Reject paths with parent directory traversal
   if [[ "$path" =~ \.\./ || "$path" =~ /\.\.$ || "$path" == ".." ]]; then
     log e "Invalid remote path: '$path' (parent directory traversal not allowed)"
     return 1
   fi
-  
+
   # Reject absolute paths
   if [[ "$path" =~ ^/ ]]; then
     log e "Invalid remote path: '$path' (must be relative path)"
     return 1
   fi
-  
+
   return 0
 }
 
@@ -118,18 +114,35 @@ _remote_roms_validate_remote_path() {
 _remote_roms_lock_config() {
   # Acquire lock on config file to prevent concurrent modification
   # Uses file descriptor $_REMOTE_ROMS_LOCK_FD to hold the lock
-  if [[ ! -f "$rd_file_lock" ]]; then
-    touch "$rd_file_lock" || return 1
+  log d "lock_config: starting, rd_file_lock='$rd_file_lock'"
+
+  if [[ -z "$rd_file_lock" ]]; then
+    log e "lock_config: rd_file_lock is empty!"
+    return 1
   fi
-  
-  eval "exec $_REMOTE_ROMS_LOCK_FD>\"$rd_file_lock\"" || return 1
-  
+
+  if [[ ! -f "$rd_file_lock" ]]; then
+    if ! touch "$rd_file_lock"; then
+      log e "lock_config: failed to create lock file"
+      return 1
+    fi
+  fi
+
+  if ! eval "exec $_REMOTE_ROMS_LOCK_FD>\"$rd_file_lock\""; then
+    log e "lock_config: failed to open file descriptor"
+    return 1
+  fi
+
   # Try to acquire exclusive lock with timeout
   if ! flock -n $_REMOTE_ROMS_LOCK_FD; then
-    log w "Waiting for config lock..."
-    flock $_REMOTE_ROMS_LOCK_FD || return 1
+    log w "lock_config: waiting for config lock..."
+    if ! flock $_REMOTE_ROMS_LOCK_FD; then
+      log e "lock_config: failed to acquire lock"
+      return 1
+    fi
   fi
-  
+
+  log d "lock_config: success"
   return 0
 }
 
@@ -153,34 +166,45 @@ _remote_roms_write_rclone_config() {
   local url="$3"
   local user="$4"
   local pass="$5"
+  local protocol="webdav"
+  local vendor="other"
 
-  # Obscure password for rclone (rclone uses reversible obfuscation, NOT encryption)
-  # This is not security - it only prevents casual shoulder-surfing of the config file
-  local obscured_pass
-  obscured_pass=$(rclone obscure "$pass" 2>/dev/null) || obscured_pass="$pass"
+  log d "_remote_roms_write_rclone_config: starting"
 
-  # Write config file first
-  {
-    echo "[$section]"
-    echo "type = webdav"
-    echo "url = $url"
-    echo "vendor = other"
-    echo "user = $user"
-    echo "pass = $obscured_pass"
-  } > "$config_file"
 
-  # Verify file was created
-  if [[ ! -f "$config_file" ]]; then
-    log e "Failed to create rclone config file at $config_file"
-    return 1
+  # Ensure parent directory exists before writing
+  local config_dir
+  config_dir="$(dirname "$config_file")"
+
+  if [[ ! -d "$config_dir" ]]; then
+    if ! mkdir -p "$config_dir" 2>&1; then
+      log e "Failed to create rclone config directory at $config_dir"
+      return 1
+    fi
+    if [[ ! -d "$config_dir" ]]; then
+      log e "Directory still does not exist after mkdir -p: $config_dir"
+      return 1
+    fi
   fi
 
-  # Then set restricted permissions
-  chmod 600 "$config_file" || {
-    log e "Failed to set permissions on rclone config"
+  # Write config file
+  {
+    echo "[$section]"
+    echo "type = $protocol"
+    echo "url = $url"
+    echo "vendor = $vendor"
+    echo "user = $user"
+    echo "pass = $pass"
+  } > "$config_file" || {
+    log e "Failed to write rclone config file at $config_file"
     return 1
   }
 
+
+
+  # Set restricted permissions
+  chmod 600 "$config_file" 2>/dev/null || true
+  log d "_remote_roms_write_rclone_config: success"
   return 0
 }
 
@@ -194,26 +218,37 @@ remote_roms_init_config() {
   # USAGE: remote_roms_init_config
   # Returns: 0 on success, 1 on failure
 
+  if [[ -z "$rd_conf" ]]; then
+    log e "init_config: rd_conf is empty!"
+    return 1
+  fi
+
+  if [[ ! -f "$rd_conf" ]]; then
+    log e "init_config: rd_conf file not found at '$rd_conf'"
+    return 1
+  fi
+
   if ! jq -e '.remote_roms' "$rd_conf" > /dev/null 2>&1; then
-    log i "Creating remote_roms configuration"
+    log i "init_config: Creating remote_roms configuration"
     local default_config='{
       "remote_protocol": "webdav",
       "remote_url": "",
       "systems": {},
       "remote_rom_enabled": false
     }'
-    
+
     if ! jq --argjson config "$default_config" '.remote_roms = $config' "$rd_conf" > "$rd_conf.tmp"; then
-      log e "Failed to create remote_roms config"
+      log e "init_config: Failed to create remote_roms config"
       rm -f "$rd_conf.tmp"
       return 1
     fi
-    
+
     if ! mv "$rd_conf.tmp" "$rd_conf"; then
-      log e "Failed to update config file"
+      log e "init_config: Failed to update config file"
       rm -f "$rd_conf.tmp"
       return 1
     fi
+    log i "init_config: remote_roms configuration created"
   fi
   return 0
 }
@@ -224,6 +259,16 @@ remote_roms_get_setting() {
   # USAGE: value=$(remote_roms_get_setting "$system" "property")
   # Returns: Setting value or empty string; exit code 0 always
 
+  if [[ -z "$rd_conf" ]]; then
+    echo ""
+    return 0
+  fi
+
+  if [[ ! -f "$rd_conf" ]]; then
+    echo ""
+    return 0
+  fi
+
   if [[ $# -eq 1 ]]; then
     # Global setting
     jq -r ".remote_roms.$1 // empty" "$rd_conf" 2>/dev/null || echo ""
@@ -231,11 +276,11 @@ remote_roms_get_setting() {
     # System-specific setting - validate system name
     local system="$1"
     local property="$2"
-    
+
     if ! _remote_roms_validate_system_name "$system"; then
       return 0  # Return empty on invalid system name
     fi
-    
+
     jq -r ".remote_roms.systems[\"$system\"].$property // empty" "$rd_conf" 2>/dev/null || echo ""
   fi
 }
@@ -246,54 +291,71 @@ remote_roms_set_setting() {
   # USAGE: remote_roms_set_setting "$system" "property" "value"
   # Returns: 0 on success, 1 on failure
 
-  if ! _remote_roms_lock_config; then
-    log e "Failed to acquire config lock"
+  # Validate rd_conf is set and file exists
+  if [[ -z "$rd_conf" ]]; then
+    log e "set_setting: rd_conf is not set"
     return 1
   fi
-  
+
+  if [[ ! -f "$rd_conf" ]]; then
+    log e "set_setting: rd_conf file not found at '$rd_conf'"
+    return 1
+  fi
+
+  if ! _remote_roms_lock_config; then
+    log e "set_setting: Failed to acquire config lock"
+    return 1
+  fi
+  log d "set_setting: lock acquired for $1"
+
   if [[ $# -eq 2 ]]; then
     # Global setting
-    if ! jq --arg val "$2" ".remote_roms.$1 = \$val" "$rd_conf" > "$rd_conf.tmp"; then
-      log e "Failed to update setting $1"
+    log d "set_setting: updating global setting $1"
+    if ! jq --arg val "$2" ".remote_roms.$1 = \$val" "$rd_conf" > "$rd_conf.tmp" 2>&1; then
+      log e "set_setting: Failed to update setting $1"
       rm -f "$rd_conf.tmp"
-      exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+      eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
       return 1
     fi
+    log d "set_setting: global setting $1 updated in temp file"
   else
     # System-specific setting
     local system="$1"
     local property="$2"
     local value="$3"
-    
+
     if ! _remote_roms_validate_system_name "$system"; then
-      exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+      eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
       return 1
     fi
-    
+
+    log d "set_setting: updating system setting $system.$property"
     if ! jq --arg s "$system" --arg p "$property" --arg v "$value" \
-      '.remote_roms.systems[$s][$p] = $v' "$rd_conf" > "$rd_conf.tmp"; then
-      log e "Failed to update setting $system.$property"
+      '.remote_roms.systems[$s][$p] = $v' "$rd_conf" > "$rd_conf.tmp" 2>&1; then
+      log e "set_setting: Failed to update setting $system.$property"
       rm -f "$rd_conf.tmp"
-      exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+      eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
       return 1
     fi
+    log d "set_setting: system setting $system.$property updated in temp file"
   fi
-  
-  if ! mv "$rd_conf.tmp" "$rd_conf"; then
-    log e "Failed to commit config changes"
+
+  if ! mv "$rd_conf.tmp" "$rd_conf" 2>&1; then
+    log e "set_setting: Failed to commit config changes"
     rm -f "$rd_conf.tmp"
-    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
-    return 1
+    eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
+      return 1
   fi
-  
-  exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+  log d "set_setting: config committed successfully"
+
+  eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
   return 0
 }
 
 remote_roms_get_remote_creds() {
   # Get remote credentials from rclone.conf (protocol-agnostic)
   # USAGE: eval $(remote_roms_get_remote_creds)  # sets $url, $user, $pass
-  # OR: local url=$(remote_roms_get_remote_creds url)
+  # OR: local url=$(remote_roms_get_remote_creds field)
   # NOTE: Uses base64 encoding to safely handle special characters in credentials
 
   local field="${1:-all}"
@@ -306,8 +368,8 @@ remote_roms_get_remote_creds() {
 
   # Get credentials from RetroDECK's isolated rclone.conf if it exists
   if [[ -f "$REMOTE_ROMS_RCLONE_CONFIG_FILE" ]]; then
-    user=$(awk -F' = ' '/^\[retrodeck-remote\]/{found=1} found && /^user = /{print $2; found=0}' "$REMOTE_ROMS_RCLONE_CONFIG_FILE")
-    pass=$(awk -F' = ' '/^\[retrodeck-remote\]/{found=1} found && /^pass = /{print $2; found=0}' "$REMOTE_ROMS_RCLONE_CONFIG_FILE")
+    user=$(grep "^user = " "$REMOTE_ROMS_RCLONE_CONFIG_FILE" | head -1 | cut -d'=' -f2- | sed 's/^ *//')
+    pass=$(grep "^pass = " "$REMOTE_ROMS_RCLONE_CONFIG_FILE" | head -1 | cut -d'=' -f2- | sed 's/^ *//')
   fi
 
   case "$field" in
@@ -328,12 +390,19 @@ remote_roms_save_connection_config() {
   local url="$1"
   local user="$2"
   local pass="$3"
-  
-  # Validate inputs
-  if ! _remote_roms_validate_remote_url "$url"; then
+
+  # Validate XDG_CONFIG_HOME is set
+  if [[ -z "$XDG_CONFIG_HOME" ]]; then
+    log e "XDG_CONFIG_HOME is not set - cannot determine config directory"
     return 1
   fi
-  
+
+  # Validate inputs
+  if ! _remote_roms_validate_remote_url "$url"; then
+    log e "URL validation failed for: '$url'"
+    return 1
+  fi
+
   if [[ -z "$user" ]]; then
     log e "Username cannot be empty"
     return 1
@@ -343,29 +412,44 @@ remote_roms_save_connection_config() {
     log e "Password cannot be empty"
     return 1
   fi
-  
+
   # Initialize config if needed before saving
-  remote_roms_init_config || {
+  if ! remote_roms_init_config; then
     log e "Failed to initialize remote ROMs config"
     return 1
-  }
+  fi
 
   # Save URL to JSON config only (no credentials)
-  remote_roms_set_setting "remote_url" "$url" || return 1
-  remote_roms_set_setting "remote_protocol" "webdav" || return 1
-  
-  # Save credentials to RetroDECK's isolated rclone config directory
-  mkdir -p "$REMOTE_ROMS_RCLONE_CONFIG_DIR" || {
-    log e "Failed to create rclone directory at $REMOTE_ROMS_RCLONE_CONFIG_DIR"
-    return 1
-  }
-
-  if ! _remote_roms_write_rclone_config "$REMOTE_ROMS_RCLONE_CONFIG_FILE" "retrodeck-remote" "$url" "$user" "$pass"; then
-    log e "Failed to write rclone config"
+  if ! remote_roms_set_setting "remote_url" "$url"; then
+    log e "Failed to save remote_url to config"
     return 1
   fi
-  
-  log i "Remote configuration saved"
+
+  if ! remote_roms_set_setting "remote_protocol" "webdav"; then
+    log e "Failed to save remote_protocol to config"
+    return 1
+  fi
+
+  # Obscure password once before saving to rclone.conf
+  local obscured_pass
+  if command -v rclone &>/dev/null; then
+    obscured_pass=$(rclone obscure "$pass" 2>/dev/null) || obscured_pass="$pass"
+  else
+    obscured_pass="$pass"
+  fi
+
+  if ! _remote_roms_write_rclone_config "$REMOTE_ROMS_RCLONE_CONFIG_FILE" "retrodeck-remote" "$url" "$user" "$obscured_pass"; then
+    log e "Failed to write rclone config to $REMOTE_ROMS_RCLONE_CONFIG_FILE"
+    return 1
+  fi
+
+  # Verify the file actually exists after writing
+  if [[ ! -f "$REMOTE_ROMS_RCLONE_CONFIG_FILE" ]]; then
+    log e "rclone config file missing after successful write: $REMOTE_ROMS_RCLONE_CONFIG_FILE"
+    return 1
+  fi
+
+  log i "Remote configuration saved successfully"
   return 0
 }
 
@@ -440,16 +524,29 @@ remote_roms_add_system() {
   if ! _remote_roms_validate_system_name "$system"; then
     return 1
   fi
-  
+
   if ! _remote_roms_validate_remote_path "$remote_path"; then
     return 1
   fi
 
-  if ! _remote_roms_lock_config; then
-    log e "Failed to acquire config lock"
+  # Validate rd_conf is set and file exists
+  if [[ -z "$rd_conf" ]]; then
+    log e "add_system: rd_conf is not set"
     return 1
   fi
 
+  if [[ ! -f "$rd_conf" ]]; then
+    log e "add_system: rd_conf file not found at '$rd_conf'"
+    return 1
+  fi
+
+  if ! _remote_roms_lock_config; then
+    log e "add_system: Failed to acquire config lock"
+    return 1
+  fi
+  log d "add_system: lock acquired, creating system object..."
+
+  log d "add_system: creating system_obj..."
   local system_obj
   system_obj=$(jq -n \
     --arg system "$system" \
@@ -458,32 +555,53 @@ remote_roms_add_system() {
       "system": $system,
       "remote_path": $remote_path,
       "enabled": true
-    }') || {
-    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
-    log e "Failed to create system object"
+    }')
+  local jq_exit_code=$?
+  log d "add_system: jq for system_obj completed with exit code $jq_exit_code"
+  if [[ $jq_exit_code -ne 0 ]] || [[ -z "$system_obj" ]]; then
+    log e "add_system: Failed to create system object with jq"
+    eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
     return 1
-  }
+  fi
+  log d "add_system: system_obj created: $system_obj"
+  log d "add_system: updating config with rd_conf='$rd_conf'..."
 
   if ! jq --arg system "$system" --argjson obj "$system_obj" '.remote_roms.systems[$system] = $obj' "$rd_conf" > "$rd_conf.tmp"; then
-    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+    log e "add_system: jq failed to update config"
     rm -f "$rd_conf.tmp"
-    log e "Failed to add system $system"
+    eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
     return 1
   fi
+  log d "add_system: config updated in temp file"
 
   if ! mv "$rd_conf.tmp" "$rd_conf"; then
-    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+    log e "add_system: Failed to commit system addition (mv failed)"
     rm -f "$rd_conf.tmp"
-    log e "Failed to commit system addition"
+    eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
     return 1
   fi
+  log d "add_system: config committed"
+  log d "add_system: system='$system'"
+  log d "add_system: remote_path='$remote_path'"
+  log d "add_system: freeing lock file='$rd_file_lock'"
 
-  exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+  eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
   log i "Added remote ROM system: $system"
   return 0
 }
 
 remote_roms_remove_system() {
+  # Validate rd_conf is set and file exists
+  if [[ -z "$rd_conf" ]]; then
+    log e "remove_system: rd_conf is not set"
+    return 1
+  fi
+
+  if [[ ! -f "$rd_conf" ]]; then
+    log e "remove_system: rd_conf file not found at '$rd_conf'"
+    return 1
+  fi
+
   # Remove a system from remote ROMs configuration
   # USAGE: remote_roms_remove_system "$system"
   # Returns: 0 on success, 1 on failure
@@ -506,20 +624,20 @@ remote_roms_remove_system() {
   fi
 
   if ! jq --arg s "$system" 'del(.remote_roms.systems[$s])' "$rd_conf" > "$rd_conf.tmp"; then
-    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+    eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
     rm -f "$rd_conf.tmp"
     log e "Failed to remove system $system"
     return 1
   fi
 
   if ! mv "$rd_conf.tmp" "$rd_conf"; then
-    exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+    eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
     rm -f "$rd_conf.tmp"
     log e "Failed to commit system removal"
     return 1
   fi
 
-  exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+  eval "exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true"
   log i "Removed remote ROM system: $system"
   return 0
 }
@@ -683,15 +801,20 @@ remote_roms_generate_rclone_config() {
     log e "Failed to write rclone config"
     return 1
   fi
+
+  # Export environment variable so rclone knows where to find the config
+  export RCLONE_CONFIG="$REMOTE_ROMS_RCLONE_CONFIG_FILE"
+  log d "generate_rclone_config: set RCLONE_CONFIG=$REMOTE_ROMS_RCLONE_CONFIG_FILE"
 }
 
 remote_roms_fetch_gamelist() {
   # Fetch gamelist.xml from remote server
+  # NOTE: Caller must ensure rclone config exists (call remote_roms_generate_rclone_config first)
   # USAGE: remote_roms_fetch_gamelist "$system"
   # Returns: 0 on success, 1 on failure
 
   local system="$1"
-  
+
   # Validate system name
   if ! _remote_roms_validate_system_name "$system"; then
     return 1
@@ -701,29 +824,30 @@ remote_roms_fetch_gamelist() {
   mkdir -p "$cache_dir" || return 1
   local gamelist_path="${cache_dir}/${REMOTE_ROMS_GAMELIST_FILE}"
 
-  remote_roms_log_debug "fetch_gamelist: fetching for $system"
-
   # Get remote path
   local remote_path=$(remote_roms_get_setting "$system" "remote_path")
   if [[ -z "$remote_path" ]]; then
+    log w "fetch_gamelist: no remote_path configured for $system"
     return 1
   fi
 
-  remote_roms_generate_rclone_config || return 1
+  log d "fetch_gamelist: fetching gamelist.xml from retrodeck-remote:${remote_path}/gamelist.xml"
 
-  # Try to fetch gamelist.xml from remote
+  # Try to fetch gamelist.xml from remote (capture stderr for debugging)
   local temp_file
   temp_file=$(mktemp) || return 1
-  [[ -n "$temp_file" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_file")
+  _REMOTE_ROMS_TEMP_FILES+=("$temp_file")
 
-  if rclone copyto "retrodeck-remote:${remote_path}/gamelist.xml" "$temp_file" 2>/dev/null; then
+  local rclone_output
+  rclone_output=$(rclone --config "$REMOTE_ROMS_RCLONE_CONFIG_FILE" copyto "retrodeck-remote:${remote_path}/gamelist.xml" "$temp_file" 2>&1)
+  local rclone_rc=$?
+
+  if [[ $rclone_rc -eq 0 ]]; then
+    log d "fetch_gamelist: downloaded gamelist.xml ($(stat -c%s "$temp_file" 2>/dev/null || echo 'unknown') bytes)"
     mv "$temp_file" "$gamelist_path" || return 1
-    remote_roms_log_debug "fetch_gamelist: downloaded gamelist.xml for $system"
-    # Remove from tracking since it's been moved (exact match only)
-    _REMOTE_ROMS_TEMP_FILES=("${_REMOTE_ROMS_TEMP_FILES[@]/#$temp_file/}")
     return 0
   else
-    remote_roms_log_debug "fetch_gamelist: no gamelist.xml found for $system"
+    log w "fetch_gamelist: rclone failed - exit code $rclone_rc: $rclone_output"
     return 1
   fi
 }
@@ -738,9 +862,12 @@ remote_roms_build_listing_from_gamelist() {
   local gamelist_path="$2"
 
   if [[ ! -f "$gamelist_path" ]]; then
+    log d "build_listing_from_gamelist: gamelist_path not found: $gamelist_path"
     echo "[]"
     return 1
   fi
+
+  log d "build_listing_from_gamelist: processing $gamelist_path"
 
   # Verify XML is valid
   if ! xmlstarlet val "$gamelist_path" > /dev/null 2>&1; then
@@ -751,13 +878,15 @@ remote_roms_build_listing_from_gamelist() {
 
   # Get game count
   local game_count=$(xmlstarlet sel -t -v "count(//game)" "$gamelist_path" 2>/dev/null)
+  log d "build_listing_from_gamelist: found $game_count games"
+
   if [[ -z "$game_count" || "$game_count" -eq 0 ]]; then
-    remote_roms_log_debug "No games found in gamelist.xml for $system"
+    log w "No games found in gamelist.xml for $system"
     echo "[]"
     return 1
   fi
 
-  remote_roms_log_debug "Found $game_count games in gamelist.xml for $system"
+  log d "build_listing_from_gamelist: extracting game data from gamelist.xml"
 
   # Build JSON array using xmlstarlet to extract path/name pairs
   # Output format: path|name (one per line, properly handling special chars)
@@ -800,6 +929,7 @@ remote_roms_build_listing_from_gamelist() {
 
 remote_roms_build_listing_from_directory() {
   # Build ROM listing from remote directory scan
+  # NOTE: Caller must ensure rclone config exists (call remote_roms_generate_rclone_config first)
   # USAGE: listing=$(remote_roms_build_listing_from_directory "$system")
 
   local system="$1"
@@ -810,23 +940,20 @@ remote_roms_build_listing_from_directory() {
     return 1
   fi
 
-  remote_roms_generate_rclone_config || return 1
-
   # Fetch listing with rclone lsjson
   local temp_file
   temp_file=$(mktemp) || return 1
-  [[ -n "$temp_file" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_file")
+  _REMOTE_ROMS_TEMP_FILES+=("$temp_file")
 
-  if rclone lsjson "retrodeck-remote:${remote_path}" --recursive > "$temp_file" 2>/dev/null; then
+  if rclone --config "$REMOTE_ROMS_RCLONE_CONFIG_FILE" lsjson "retrodeck-remote:${remote_path}" --recursive > "$temp_file" 2>/dev/null; then
     # Filter only files and format
-    local listing=$(jq '[.[] | select(.IsDir == false) | {
+    jq '[.[] | select(.IsDir == false) | {
       "name": .Name,
       "display_name": .Name,
       "size": .Size,
       "path": .Path,
       "modtime": .ModTime
-    }]' "$temp_file")
-    echo "$listing"
+    }]' "$temp_file"
     return 0
   else
     echo "[]"
@@ -834,9 +961,121 @@ remote_roms_build_listing_from_directory() {
   fi
 }
 
+remote_roms_convert_gamelist_for_esde() {
+  # Convert a gamelist.xml for ES-DE, changing paths to ./remote/<romname>
+  # Outputs gamelist entries as XML string for merging
+  # USAGE: xml_entries=$(remote_roms_convert_gamelist_for_esde "$system" "$gamelist_path")
+
+  local system="$1"
+  local gamelist_path="$2"
+
+  if [[ ! -f "$gamelist_path" ]]; then
+    echo ""
+    return 1
+  fi
+
+  # Use xmlstarlet ed to edit the XML in-place (copy mode)
+  # Change all path values from ./filename to ./remote/filename
+  xmlstarlet ed \
+    -u "//game/path" -x "concat('./remote/', substring-after(., './'))" \
+    "$gamelist_path" 2>/dev/null | \
+  xmlstarlet sel -t -m "//game" -c . -n 2>/dev/null | \
+  sed 's/^/  /'
+}
+
+remote_roms_build_gamelist_from_json() {
+  # Build gamelist.xml entries from JSON listing (for directory-based discovery)
+  # Outputs XML game entries
+  # USAGE: xml_entries=$(remote_roms_build_gamelist_from_json "$system" "$roms_json")
+
+  local system="$1"
+  local roms_json="$2"
+
+  if [[ -z "$roms_json" || "$roms_json" == "[]" ]]; then
+    echo ""
+    return 1
+  fi
+
+  # Generate game entries from JSON
+  echo "$roms_json" | jq -r '.[] | [
+    "  <game>",
+    "    <path>./remote/" + .name + "</path>",
+    "    <name>" + .display_name + "</name>",
+    "    <desc>Remote ROM</desc>",
+    "  </game>"
+  ] | .[]'
+}
+
+remote_roms_update_esde_gamelist() {
+  # Merge or create ES-DE gamelist.xml with remote ROM entries
+  # Removes old remote ROM entries first, then adds new ones
+  # USAGE: remote_roms_update_esde_gamelist "$system" "$new_xml_entries"
+
+  local system="$1"
+  local new_xml_entries="$2"
+  local esde_gamelist_path="${rd_home_path}/ES-DE/gamelists/${system}/gamelist.xml"
+  local esde_gamelist_dir="$(dirname "$esde_gamelist_path")"
+
+  # Ensure gamelist directory exists
+  mkdir -p "$esde_gamelist_dir" || {
+    log e "Failed to create gamelist directory: $esde_gamelist_dir"
+    return 1
+  }
+
+  # Create temp file for new gamelist
+  local temp_gamelist
+  temp_gamelist=$(mktemp) || return 1
+  [[ -n "$temp_gamelist" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_gamelist")
+
+  log d "update_esde_gamelist: building new gamelist at $esde_gamelist_path"
+  log d "update_esde_gamelist: new_xml_entries length=${#new_xml_entries}"
+
+  # Build new gamelist content
+  {
+    echo "<?xml version=\"1.0\"?>"
+    echo "<gameList>"
+
+    # If existing gamelist exists, copy non-remote entries
+    if [[ -f "$esde_gamelist_path" ]]; then
+      log d "update_esde_gamelist: merging with existing ES-DE gamelist: $esde_gamelist_path"
+      # Extract games that don't have ./remote/ paths
+      xmlstarlet sel -t -m "//game[not(starts-with(path, './remote/'))]" -c . -n "$esde_gamelist_path" 2>/dev/null | sed 's/^/  /'
+    else
+      log d "update_esde_gamelist: no existing gamelist, creating new one"
+    fi
+
+    # Add new remote ROM entries
+    echo "$new_xml_entries"
+
+    echo "</gameList>"
+  } > "$temp_gamelist"
+
+  log d "update_esde_gamelist: temp gamelist created at $temp_gamelist"
+  log d "update_esde_gamelist: temp file size=$(stat -c%s "$temp_gamelist" 2>/dev/null || echo 'unknown')"
+
+  # Validate the XML before moving
+  if xmlstarlet val "$temp_gamelist" > /dev/null 2>&1; then
+    log d "update_esde_gamelist: XML validation passed"
+    if mv "$temp_gamelist" "$esde_gamelist_path"; then
+      _REMOTE_ROMS_TEMP_FILES=("${_REMOTE_ROMS_TEMP_FILES[@]/#$temp_gamelist/}")
+      log d "update_esde_gamelist: successfully updated ES-DE gamelist at: $esde_gamelist_path"
+      return 0
+    else
+      log e "Failed to move gamelist to: $esde_gamelist_path"
+      return 1
+    fi
+  else
+    log e "Generated gamelist.xml is invalid XML, temp file content:"
+    cat "$temp_gamelist" | head -20 | while read line; do log e "  $line"; done
+    return 1
+  fi
+}
+
 remote_roms_refresh_system_listing() {
-  # Refresh ROM listing for a system
-  # Tries gamelist.xml first, falls back to directory listing
+  # Refresh ROM listing for a system and update ES-DE gamelist.xml
+  # Fetches gamelist.xml from remote, converts paths to ./remote/<romname>
+  # and merges/creates local ES-DE gamelist.xml
+  # Falls back to building from directory listing if no remote gamelist
   # USAGE: remote_roms_refresh_system_listing "$system"
   # Returns: 0 on success, 1 on failure
 
@@ -844,33 +1083,68 @@ remote_roms_refresh_system_listing() {
   local cache_dir="${REMOTE_ROMS_CACHE_DIR}/${system}"
   local cache_file="${cache_dir}/${REMOTE_ROMS_LISTING_FILE}"
 
-  remote_roms_log_debug "refresh_system_listing: refreshing for $system"
+  log d "refresh_system_listing: starting for system=$system"
 
-  # Ensure rclone config exists
-  remote_roms_generate_rclone_config || return 1
+  # Validate rd_home_path is set
+  if [[ -z "$rd_home_path" ]]; then
+    log e "refresh_system_listing: rd_home_path is not set!"
+    return 1
+  fi
 
-  # Try to fetch gamelist.xml first
-  local listing=""
+  local esde_gamelist_path="${rd_home_path}/ES-DE/gamelists/${system}/gamelist.xml"
+
+  # Generate rclone config once - all sub-functions will use this
+  if ! remote_roms_generate_rclone_config; then
+    log e "refresh_system_listing: failed to generate rclone config"
+    return 1
+  fi
+
+  # Try to fetch gamelist.xml from remote
+  local gamelist_xml_content=""
+  local roms_json=""
+
   if remote_roms_fetch_gamelist "$system"; then
-    local gamelist_path="${cache_dir}/${REMOTE_ROMS_GAMELIST_FILE}"
-    listing=$(remote_roms_build_listing_from_gamelist "$system" "$gamelist_path")
-    remote_roms_log_debug "refresh_system_listing: built listing from gamelist.xml for $system"
+    local remote_gamelist_path="${cache_dir}/${REMOTE_ROMS_GAMELIST_FILE}"
+    log d "refresh_system_listing: fetched remote gamelist"
+
+    # Parse gamelist.xml and convert paths to ./remote/<romname>
+    gamelist_xml_content=$(remote_roms_convert_gamelist_for_esde "$system" "$remote_gamelist_path")
+    roms_json=$(remote_roms_build_listing_from_gamelist "$system" "$remote_gamelist_path")
+  else
+    log d "refresh_system_listing: no remote gamelist, trying directory listing"
   fi
 
   # If no gamelist or gamelist failed, build from directory
-  if [[ -z "$listing" || "$listing" == "[]" ]]; then
-    listing=$(remote_roms_build_listing_from_directory "$system")
-    remote_roms_log_debug "refresh_system_listing: built listing from directory for $system"
+  if [[ -z "$roms_json" || "$roms_json" == "[]" ]]; then
+    roms_json=$(remote_roms_build_listing_from_directory "$system")
+    log d "refresh_system_listing: directory listing length=${#roms_json}"
+
+    # Build gamelist.xml from directory listing
+    if [[ -n "$roms_json" && "$roms_json" != "[]" ]]; then
+      gamelist_xml_content=$(remote_roms_build_gamelist_from_json "$system" "$roms_json")
+    fi
   fi
 
   # Save listing to cache
-  if [[ -n "$listing" && "$listing" != "[]" ]]; then
-    echo "$listing" > "$cache_file"
-    local count=$(echo "$listing" | jq 'length')
+  if [[ -n "$roms_json" && "$roms_json" != "[]" ]]; then
+    echo "$roms_json" > "$cache_file"
+    local count=$(echo "$roms_json" | jq 'length')
     log i "Cached $count ROMs for $system"
-    return 0
   else
-    log w "No ROMs found for $system"
+    log w "refresh_system_listing: no roms_json to cache"
+  fi
+
+  # Update ES-DE gamelist.xml with remote ROMs
+  if [[ -n "$gamelist_xml_content" ]]; then
+    if remote_roms_update_esde_gamelist "$system" "$gamelist_xml_content"; then
+      log i "Updated ES-DE gamelist.xml for $system with remote ROMs"
+      return 0
+    else
+      log e "refresh_system_listing: failed to update ES-DE gamelist"
+      return 1
+    fi
+  else
+    log w "No gamelist_xml_content generated for $system"
     return 1
   fi
 }
@@ -947,7 +1221,7 @@ remote_roms_download_rom() {
   log i "Downloading $rom_name from remote..."
 
   # Use rclone copyto with timeouts
-  if rclone copyto "retrodeck-remote:${remote_path}/${rom_name}" "$temp_file" \
+  if rclone --config "$REMOTE_ROMS_RCLONE_CONFIG_FILE" copyto "retrodeck-remote:${remote_path}/${rom_name}" "$temp_file" \
     --progress --contimeout ${REMOTE_ROMS_DOWNLOAD_CONNECT_TIMEOUT}s --timeout ${REMOTE_ROMS_DOWNLOAD_TIMEOUT}s 2>/dev/null; then
     if mv "$temp_file" "$local_path"; then
       log i "Downloaded $rom_name successfully"
@@ -964,211 +1238,18 @@ remote_roms_download_rom() {
 }
 
 # ============================================
-# Virtual Browser Dialog Functions
+# Remote ROMs Management Functions
 # ============================================
 
-remote_roms_browse_system() {
-  # Show ROM browser dialog for a system
-  # USAGE: selected_file=$(remote_roms_browse_system "$system")
-  # Returns: Selected file or empty on cancel/failure
-
-  local system="$1"
-  
-  # Validate system name
-  if ! _remote_roms_validate_system_name "$system"; then
-    return 1
-prprismaazure  fi
-
-  remote_roms_log_debug "browse_system: opening browser for $system"
-
-  # Ensure listing is available (with automatic refresh)
-  local listing=$(remote_roms_ensure_listing "$system")
-  local count=$(echo "$listing" | jq 'length')
-
-  if [[ "$count" -eq 0 ]]; then
-    zenity --error --title "Remote ROMs" --text "No ROMs found for $system"
-    return 1
-  fi
-
-  # For large libraries, use alphabetical bucketing
-  if [[ "$count" -gt $REMOTE_ROMS_ALPHABETICAL_BUCKET_THRESHOLD ]]; then
-    remote_roms_browse_alphabetical "$system" "$listing"
-  else
-    remote_roms_show_game_list "$system" "$listing"
-  fi
-}
-
-remote_roms_browse_alphabetical() {
-  # Browse with A-Z letter selection first
-  # USAGE: selected_file=$(remote_roms_browse_alphabetical "$system" "$listing")
-
-  local system="$1"
-  local listing="$2"
-
-  # Get unique first letters from display names
-  local letters=$(echo "$listing" | jq -r '.[].display_name[0:1] | ascii_upcase' | sort -u)
-
-  # Show letter selector
-  local selected_letter=$(echo "$letters" | zenity --list \
-    --title "Browse $system - Select Letter" \
-    --text "Found $(echo "$listing" | jq 'length') games. Choose a letter:" \
-    --column "Letter" \
-    --width 200 --height 400 2>/dev/null)
-
-  [[ -z "$selected_letter" ]] && return 1
-
-  # Filter games by selected letter
-  local filtered=$(echo "$listing" | jq --arg letter "$selected_letter" \
-    '[.[] | select(.display_name | ascii_upcase | startswith($letter))]')
-
-  # Show filtered list
-  remote_roms_show_game_list "$system" "$filtered"
-}
-
-remote_roms_show_game_list() {
-  # Show zenity list dialog for game selection
-  # USAGE: selected_file=$(remote_roms_show_game_list "$system" "$game_json")
-
-  local system="$1"
-  local game_data="$2"
-
-  # Format for zenity: display_name | size | filename
-  local list_data=$(echo "$game_data" | jq -r '
-    .[] | [
-      .display_name,
-      (if .size > 0 then (.size | tonumber | . / 1024 / 1024 | floor | tostring + " MB") else "Unknown" end),
-      .name
-    ] | @tsv
-  ')
-
-  # Show selection dialog
-  local selection=$(echo "$list_data" | zenity --list \
-    --title "Select ROM - $system" \
-    --text "Choose a game to download:" \
-    --column "Name" \
-    --column "Size" \
-    --column "Filename" \
-    --hide-column 3 \
-    --print-column 3 \
-    --width 700 --height 600 \
-    --search-column 1 2>/dev/null)
-
-  echo "$selection"
-}
-
-remote_roms_search_dialog() {
-  # Search-based ROM finder
-  # USAGE: selected_file=$(remote_roms_search_dialog "$system" ["$query"])
-  # Returns: Selected file or empty on cancel/failure
-
-  local system="$1"
-  local query="${2:-}"
-
-  # Validate system name
-  if ! _remote_roms_validate_system_name "$system"; then
-    return 1
-  fi
-
-  # Prompt for search if no query provided
-  if [[ -z "$query" ]]; then
-    query=$(zenity --entry \
-      --title "Search $system" \
-      --text "Enter game name to search:" 2>/dev/null)
-  fi
-
-  [[ -z "$query" ]] && return 1
-
-  local listing=$(remote_roms_get_system_listing "$system")
-
-  # Search in display names (case-insensitive)
-  local matches=$(echo "$listing" | jq --arg q "$query" \
-    '[.[] | select(.display_name | test($q; "i"))]')
-
-  local match_count=$(echo "$matches" | jq 'length')
-
-  if [[ "$match_count" -eq 0 ]]; then
-    zenity --error --title "Search" --text "No games found matching '$query'"
-    return 1
-  elif [[ "$match_count" -eq 1 ]]; then
-    # Auto-select single match
-    echo "$matches" | jq -r '.[0].name'
-    return 0
-  else
-    # Show matches
-    remote_roms_show_game_list "$system" "$matches"
-  fi
-}
-
-remote_roms_virtual_browser_menu() {
-  # Main entry point for virtual browser
-  # USAGE: local_path=$(remote_roms_virtual_browser_menu "$system")
-  # Returns: 0 on success with path, 1 on failure
-
-  local system="$1"
-
-  # Validate system name
-  if ! _remote_roms_validate_system_name "$system"; then
-    return 1
-  fi
-
-  # Initialize and check config
-  if ! remote_roms_init_config; then
-    log e "Failed to initialize remote ROMs config"
-    return 1
-  fi
-
-  # Check if system is enabled (global + system setting)
-  local remote_rom_enabled=$(remote_roms_get_setting "remote_rom_enabled")
-  local system_enabled=$(remote_roms_get_setting "$system" "enabled")
-  if [[ "$remote_rom_enabled" != "true" || "$system_enabled" != "true" ]]; then
-    log w "Remote ROMs not enabled for $system"
-    return 1
-  fi
-
-  # Show main menu
-  local action=$(zenity --list \
-    --title "Remote ROMs - $system" \
-    --text "Choose an action:" \
-    --column "Action" --column "Description" \
-    "browse" "Browse all games (A-Z)" \
-    "search" "Search by name" \
-    "latest" "Show recently added" \
-    --width 400 --height 300 2>/dev/null)
-
-  local selected_file=""
-
-  case "$action" in
-    browse)
-      selected_file=$(remote_roms_browse_system "$system") || return 1
-      ;;
-    search)
-      selected_file=$(remote_roms_search_dialog "$system") || return 1
-      ;;
-    latest)
-      # Show recently added games
-      local listing=$(remote_roms_get_system_listing "$system")
-      local latest=$(echo "$listing" | jq --argjson count "$REMOTE_ROMS_LATEST_GAMES_COUNT" 'sort_by(.modtime) | reverse | .[0:$count]')
-      selected_file=$(remote_roms_show_game_list "$system" "$latest") || return 1
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-
-  [[ -z "$selected_file" ]] && return 1
-
-  # Download and return local path
-  remote_roms_download_rom "$system" "$selected_file"
-}
-
 remote_roms_create_esde_integration() {
-  # Create ES-DE integration files for remote ROM browsing
-  # Creates a "Remote" folder with gamelist entry that triggers the virtual browser
+  # Create ES-DE integration for remote ROM browsing
+  # Creates a "remote" folder for storing downloaded ROMs
+  # The gamelist.xml is now created/updated by remote_roms_refresh_system_listing
   # USAGE: remote_roms_create_esde_integration "$system"
   # Returns: 0 on success, 1 on failure
 
   local system="$1"
-  
+
   # Validate system name
   if ! _remote_roms_validate_system_name "$system"; then
     return 1
@@ -1177,60 +1258,17 @@ remote_roms_create_esde_integration() {
   local system_roms_path="${roms_path}/${system}"
   local remote_folder="${system_roms_path}/remote"
 
-  # Create remote folder
+  # Create remote folder for storing downloaded ROMs
   mkdir -p "$remote_folder" || {
     log e "Failed to create remote folder for $system"
     return 1
   }
 
-  # Create trigger file that opens the virtual browser when "launched"
-  # This is a placeholder file that run_game.sh detects
-  local trigger_file="${remote_folder}/Browse Remote ROMs.remote_trigger"
-  {
-    echo "# This file triggers the virtual browser when selected in ES-DE"
-    echo "# System: $system"
-  } > "$trigger_file" || {
-    log e "Failed to create trigger file for $system"
-    return 1
-  }
+  # Note: The gamelist.xml for remote ROMs is now managed by
+  # remote_roms_refresh_system_listing and remote_roms_update_esde_gamelist
+  # which fetch the gamelist from the remote server and convert paths
 
-  # Create gamelist.xml entry for the remote folder if gamelist exists
-  local gamelist_path="${system_roms_path}/gamelist.xml"
-  if [[ -f "$gamelist_path" ]]; then
-    # Check if entry already exists
-    if ! grep -q "Browse Remote ROMs" "$gamelist_path" 2>/dev/null; then
-      # Add entry before closing </gameList> tag
-      local temp_gamelist
-      temp_gamelist=$(mktemp) || return 1
-      [[ -n "$temp_gamelist" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_gamelist")
-
-      if awk '
-        /<\/gameList>/ {
-          print "  <game>"
-          print "    <path>./remote/Browse Remote ROMs.remote_trigger</path>"
-          print "    <name>📡 Browse Remote ROMs</name>"
-          print "    <desc>Browse and download ROMs from your remote server</desc>"
-          print "    <image></image>"
-          print "    <thumbnail></thumbnail>"
-          print "  </game>"
-        }
-        { print }
-      ' "$gamelist_path" > "$temp_gamelist"; then
-        if mv "$temp_gamelist" "$gamelist_path"; then
-          # Remove from tracking since it's been moved (exact match only)
-          _REMOTE_ROMS_TEMP_FILES=("${_REMOTE_ROMS_TEMP_FILES[@]/#$temp_gamelist/}")
-        else
-          log e "Failed to update gamelist.xml for $system"
-          return 1
-        fi
-      else
-        log e "Failed to process gamelist.xml for $system"
-        return 1
-      fi
-    fi
-  fi
-
-  log i "ES-DE integration created for $system"
+  log i "ES-DE integration created for $system (remote folder ready)"
   return 0
 }
 
@@ -1240,7 +1278,7 @@ remote_roms_remove_esde_integration() {
   # Returns: 0 on success, 1 on failure
 
   local system="$1"
-  
+
   # Validate system name
   if ! _remote_roms_validate_system_name "$system"; then
     return 1
@@ -1248,43 +1286,38 @@ remote_roms_remove_esde_integration() {
 
   local remote_folder="${roms_path}/${system}/remote"
 
-  # Remove remote folder and trigger file
+  # Remove remote folder and any downloaded ROMs
   if [[ -d "$remote_folder" ]]; then
     rm -rf "$remote_folder" || {
       log w "Failed to remove remote folder for $system"
     }
   fi
 
-  # Remove from gamelist.xml if present
-  local gamelist_path="${roms_path}/${system}/gamelist.xml"
-  if [[ -f "$gamelist_path" ]] && grep -q "Browse Remote ROMs" "$gamelist_path" 2>/dev/null; then
+  # Remove remote ROM entries from ES-DE gamelist.xml
+  local esde_gamelist_path="${rd_home_path}/ES-DE/gamelists/${system}/gamelist.xml"
+  if [[ -f "$esde_gamelist_path" ]]; then
     local temp_gamelist
     temp_gamelist=$(mktemp) || return 1
     [[ -n "$temp_gamelist" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_gamelist")
 
-    if awk '
-      /<game>/ { in_game=1; game_block=$0; next }
-      in_game {
-        game_block=game_block "\n" $0
-        if (/<\/game>/) {
-          if (game_block !~ /Browse Remote ROMs/) {
-            print game_block
-          }
-          in_game=0
-          game_block=""
-        }
-        next
-      }
-      { print }
-    ' "$gamelist_path" > "$temp_gamelist"; then
-      if mv "$temp_gamelist" "$gamelist_path"; then
-        # Remove from tracking since it's been moved (exact match only)
+    # Remove games with ./remote/ paths (remote ROM entries)
+    if xmlstarlet sel -t -m "//game[not(starts-with(path, './remote/'))]" -c . -n "$esde_gamelist_path" 2>/dev/null > "$temp_gamelist"; then
+      # Reconstruct valid gamelist.xml
+      {
+        echo "<?xml version=\"1.0\"?>"
+        echo "<gameList>"
+        cat "$temp_gamelist"
+        echo "</gameList>"
+      } > "${temp_gamelist}.xml"
+
+      if xmlstarlet val "${temp_gamelist}.xml" > /dev/null 2>&1; then
+        mv "${temp_gamelist}.xml" "$esde_gamelist_path"
         _REMOTE_ROMS_TEMP_FILES=("${_REMOTE_ROMS_TEMP_FILES[@]/#$temp_gamelist/}")
+        rm -f "$temp_gamelist"
       else
-        log w "Failed to update gamelist.xml for $system"
+        log w "Generated gamelist.xml was invalid, not updating"
+        rm -f "${temp_gamelist}.xml"
       fi
-    else
-      log w "Failed to process gamelist.xml for $system"
     fi
   fi
 
@@ -1296,21 +1329,21 @@ remote_roms_set_system_auto_refresh() {
   # Set auto_refresh flag for a system
   # USAGE: remote_roms_set_system_auto_refresh "$system" "true|false"
   # Returns: 0 on success, 1 on failure
-  
+
   local system="$1"
   local value="$2"
-  
+
   # Validate system name
   if ! _remote_roms_validate_system_name "$system"; then
     return 1
   fi
-  
+
   # Validate value
   if [[ "$value" != "true" && "$value" != "false" ]]; then
     log e "Invalid auto_refresh value: '$value' (must be 'true' or 'false')"
     return 1
   fi
-  
+
   remote_roms_set_setting "$system" "auto_refresh" "$value"
 }
 
@@ -1326,16 +1359,16 @@ remote_roms_startup_auto_refresh() {
   # Get all systems with auto_refresh enabled
   local systems=$(remote_roms_get_setting "systems")
   local auto_refresh_systems=$(echo "$systems" | jq -r '[.[] | select(.auto_refresh == true) | .system] | .[]')
-  
+
   [[ -z "$auto_refresh_systems" ]] && return 0
 
   log i "Auto-refreshing remote ROM listings for enabled systems"
-  
+
   while IFS= read -r system; do
     [[ -z "$system" ]] && continue
     log d "Auto-refreshing $system..."
     remote_roms_refresh_system_listing "$system" &
   done <<< "$auto_refresh_systems"
-  
+
   # Don't wait for background jobs - let them complete asynchronously
 }

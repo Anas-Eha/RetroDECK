@@ -1257,6 +1257,20 @@ configurator_iconset_toggle_dialog() {
   configurator_global_presets_and_settings_dialog
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 configurator_remote_dialog() {
   # Main dialog for Remote Connection settings
   # USAGE: configurator_remote_dialog
@@ -1321,14 +1335,14 @@ configurator_remote_roms_connection_dialog() {
   local current_url=$(remote_roms_get_setting "remote_url")
   local current_user=$(remote_roms_get_remote_creds user)
 
-  local form_result=$(rd_zenity --forms \
+  local form_result
+  form_result=$(rd_zenity --forms \
     --title "RetroDECK Configurator - Remote Connection" \
     --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
     --text="Configure your remote server connection settings.\n\n<span foreground='$purple'><b>The source folder should contain subfolders like /gba, /snes, /ps2 etc.</b></span>" \
     --add-entry="Server URL (e.g., https://myserver.com/webdav): $current_url" \
     --add-entry="Username: $current_user" \
-    --add-password="Password:")
-
+    --add-password="Password:" 2>&1)
   local rc=$?
 
   if [[ $rc -ne 0 || -z "$form_result" ]]; then
@@ -1337,29 +1351,32 @@ configurator_remote_roms_connection_dialog() {
   fi
 
   # Parse form results (pipe-separated from zenity forms)
-  # NOTE: This uses the last two fields as user/pass to handle | in password
-  local url=$(echo "$form_result" | awk -F'|' '{print $1}')
-  local user=$(echo "$form_result" | awk -F'|' '{print $(NF-1)}')
-  local pass=$(echo "$form_result" | awk -F'|' '{print $NF}')
+  # Fields: URL|Username|Password (3 fields total from --forms)
+  local url=$(echo "$form_result" | cut -d'|' -f1)
+  local user=$(echo "$form_result" | cut -d'|' -f2)
+  local pass=$(echo "$form_result" | cut -d'|' -f3-)
+
+  log d "Parsed form - url='$url', user='$user', pass length=${#pass}"
 
   if [[ -z "$url" || -z "$user" ]]; then
     configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>URL and Username are required.</b></span>\n\nPlease enter both values."
     configurator_remote_roms_connection_dialog
-    return
+    return 1
   fi
 
   # Save connection config with error handling
+  log d "Calling remote_roms_save_connection_config..."
   if ! remote_roms_save_connection_config "$url" "$user" "$pass"; then
+    log e "remote_roms_save_connection_config failed"
     configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>Failed to save connection settings.</b></span>\n\nPlease check the logs for details."
     configurator_remote_dialog
-    return
+    return 1
   fi
 
+  log d "Save successful, showing confirmation"
   configurator_generic_dialog "RetroDECK Configurator - Settings Saved" "<span foreground='$purple'><b>Remote connection settings saved.</b></span>\n\nYou can now test the connection or configure mounts."
   configurator_remote_dialog
 }
-
-
 
 configurator_remote_roms_test_dialog() {
   # Dialog to test remote server connection
@@ -1430,10 +1447,9 @@ configurator_remote_roms_manage_system_dialog() {
   if [[ "$is_configured" == "false" ]]; then
     menu_options+=("Enable Remote ROMs" "Set up this system for remote access")
   else
-    # Virtual Browser actions
-    menu_options+=("Browse ROMs" "Open virtual browser to view and download ROMs")
+    # Cache management actions
     menu_options+=("Refresh Cache" "Update ROM listing from remote server")
-    
+
     if [[ "$auto_refresh" == "true" ]]; then
       menu_options+=("Disable Auto-refresh" "Don't auto-refresh cache on startup")
     else
@@ -1455,7 +1471,7 @@ configurator_remote_roms_manage_system_dialog() {
   local rc=$?
 
   if [[ $rc -ne 0 || -z "$choice" ]]; then
-    configurator_remote_roms_discover_dialog
+    configurator_remote_roms_manage_systems_list_dialog
     return
   fi
 
@@ -1466,24 +1482,14 @@ configurator_remote_roms_manage_system_dialog() {
       remote_roms_add_system "$system" "$system"
       remote_roms_set_system_auto_refresh "$system" "true"
 
-      # Create ES-DE integration (Remote folder + trigger file)
+      # Create ES-DE integration (remote folder + gamelist.xml sync)
       remote_roms_create_esde_integration "$system"
 
-      # Pre-fetch listing
+      # Pre-fetch listing and build gamelist.xml
       if remote_roms_refresh_system_listing "$system"; then
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured and ready!</b></span>\n\nES-DE integration created.\n\nLook for '📡 Browse Remote ROMs' in your $system folder."
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured and ready!</b></span>\n\nES-DE gamelist.xml updated with remote ROMs.\n\nLook for remote ROMs in your $system folder in ES-DE."
       else
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nES-DE integration created. The cache will be refreshed when you browse."
-      fi
-      refresh=true
-      ;;
-    "Browse ROMs")
-      # Open virtual browser for this system
-      local selected_rom
-      selected_rom=$(remote_roms_virtual_browser_menu "$system")
-      
-      if [[ -n "$selected_rom" ]]; then
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>ROM Downloaded!</b></span>\n\nDownloaded: $(basename "$selected_rom")\n\nThe ROM is now available locally at:\n$selected_rom"
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nRemote folder created. The gamelist will be refreshed when you browse."
       fi
       refresh=true
       ;;
@@ -1695,8 +1701,12 @@ configurator_remote_roms_refresh_dialog() {
     local refreshed=0
     for system in "${systems_to_enable[@]}"; do
       echo "# Refreshing $system..."
-      if remote_roms_refresh_system_listing "$system" 2>/dev/null; then
+      log d "[SYNC] Starting refresh for system: $system"
+      if remote_roms_refresh_system_listing "$system"; then
         ((refreshed++))
+        log d "[SYNC] Successfully refreshed $system"
+      else
+        log e "[SYNC] Failed to refresh $system"
       fi
       local progress=$(( 10 + (refreshed * 90 / enable_count) ))
       echo "$progress"
