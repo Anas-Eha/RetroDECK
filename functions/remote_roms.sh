@@ -2,7 +2,7 @@
 
 # Remote ROMs Functions
 # Provides WebDAV-based remote ROM browsing and downloading
-# Uses rclone for all remote operations - no FUSE mounts required
+# Uses rclone for all remote operations
 
 # ============================================
 # Configuration & Constants
@@ -11,6 +11,134 @@
 readonly REMOTE_ROMS_CACHE_DIR="${rd_cache}/remote_roms"
 readonly REMOTE_ROMS_LISTING_FILE="listing.json"
 readonly REMOTE_ROMS_GAMELIST_FILE="gamelist.xml"
+
+# UI/UX Constants
+readonly REMOTE_ROMS_ALPHABETICAL_BUCKET_THRESHOLD=200  # Games before using A-Z buckets
+readonly REMOTE_ROMS_LATEST_GAMES_COUNT=50              # Number of recent games to show
+
+# File Locking
+readonly _REMOTE_ROMS_LOCK_FD=3
+
+# Timeout Constants (seconds)
+readonly REMOTE_ROMS_RCLONE_CONNECT_TIMEOUT=10
+readonly REMOTE_ROMS_RCLONE_TIMEOUT=10
+readonly REMOTE_ROMS_DOWNLOAD_CONNECT_TIMEOUT=30
+readonly REMOTE_ROMS_DOWNLOAD_TIMEOUT=300
+
+# ============================================
+# Cleanup Infrastructure
+# ============================================
+
+# Track temporary files for guaranteed cleanup
+_REMOTE_ROMS_TEMP_RCLONE_CONFIG=""
+_REMOTE_ROMS_TEMP_FILES=()
+
+_remote_roms_cleanup_temp_files() {
+  # Cleanup function to ensure all temporary files are removed on any exit
+  # Handles: normal exit, errors, signals (INT, TERM)
+  
+  [[ -n "$_REMOTE_ROMS_TEMP_RCLONE_CONFIG" ]] && rm -f "$_REMOTE_ROMS_TEMP_RCLONE_CONFIG"
+  
+  for file in "${_REMOTE_ROMS_TEMP_FILES[@]}"; do
+    [[ -n "$file" ]] && rm -f "$file"
+  done
+  
+  _REMOTE_ROMS_TEMP_RCLONE_CONFIG=""
+  _REMOTE_ROMS_TEMP_FILES=()
+}
+
+_remote_roms_register_temp_file() {
+  # Register a temporary file for cleanup
+  local temp_file="$1"
+  [[ -n "$temp_file" ]] && _REMOTE_ROMS_TEMP_FILES+=("$temp_file")
+}
+
+trap _remote_roms_cleanup_temp_files EXIT INT TERM
+
+# ============================================
+# Input Validation Functions
+# ============================================
+
+_remote_roms_validate_system_name() {
+  # Validate system name format (prevent injection/traversal)
+  local system="$1"
+  
+  # Allow only alphanumeric, underscore, hyphen
+  if [[ ! "$system" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    log e "Invalid system name: '$system' (alphanumeric, hyphen, underscore only)"
+    return 1
+  fi
+  return 0
+}
+
+_remote_roms_validate_webdav_url() {
+  # Validate WebDAV URL format
+  local url="$1"
+  
+  if [[ -z "$url" ]]; then
+    log e "WebDAV URL cannot be empty"
+    return 1
+  fi
+  
+  # Basic URL validation: must start with http:// or https://
+  if [[ ! "$url" =~ ^https?:// ]]; then
+    log e "Invalid WebDAV URL: '$url' (must start with http:// or https://)"
+    return 1
+  fi
+  
+  return 0
+}
+
+_remote_roms_validate_remote_path() {
+  # Validate remote path (prevent directory traversal)
+  local path="$1"
+  
+  if [[ -z "$path" ]]; then
+    log e "Remote path cannot be empty"
+    return 1
+  fi
+  
+  # Reject paths with parent directory traversal
+  if [[ "$path" =~ \.\./ || "$path" =~ /\.\.$ || "$path" == ".." ]]; then
+    log e "Invalid remote path: '$path' (parent directory traversal not allowed)"
+    return 1
+  fi
+  
+  # Reject absolute paths
+  if [[ "$path" =~ ^/ ]]; then
+    log e "Invalid remote path: '$path' (must be relative path)"
+    return 1
+  fi
+  
+  return 0
+}
+
+# ============================================
+# File Locking Functions (for config atomicity)
+# ============================================
+
+_remote_roms_lock_config() {
+  # Acquire lock on config file to prevent concurrent modification
+  # Uses file descriptor $_REMOTE_ROMS_LOCK_FD to hold the lock
+  if [[ ! -f "$rd_file_lock" ]]; then
+    touch "$rd_file_lock" || return 1
+  fi
+  
+  eval "exec $_REMOTE_ROMS_LOCK_FD>\"$rd_file_lock\"" || return 1
+  
+  # Try to acquire exclusive lock with timeout
+  if ! flock -n $_REMOTE_ROMS_LOCK_FD; then
+    log w "Waiting for config lock..."
+    flock $_REMOTE_ROMS_LOCK_FD || return 1
+  fi
+  
+  return 0
+}
+
+_remote_roms_unlock_config() {
+  # Release lock on config file
+  exec $_REMOTE_ROMS_LOCK_FD>&- 2>/dev/null || true
+}
 
 # ============================================
 # Internal Helper Functions
@@ -23,8 +151,37 @@ remote_roms_log_debug() {
   fi
 }
 
+_remote_roms_zenity_wrapper() {
+  # Wrapper for zenity that captures errors for debug logging
+  # All zenity stderr is logged when REMOTE_ROMS_DEBUG=1
+  # USAGE: output=$(_remote_roms_zenity_wrapper --list --title "Foo" ...)
+
+  local output
+  local err_output
+  err_output=$(mktemp)
+  _remote_roms_register_temp_file "$err_output"
+
+  output=$(zenity "$@" 2>"$err_output")
+  local exit_code=$?
+
+  if [[ "${REMOTE_ROMS_DEBUG:-0}" == "1" ]]; then
+    local err_content
+    err_content=$(cat "$err_output" 2>/dev/null)
+    if [[ -n "$err_content" ]]; then
+      log d "zenity stderr: $err_content"
+    fi
+  fi
+
+  # Remove from tracking and cleanup
+  _REMOTE_ROMS_TEMP_FILES=("${_REMOTE_ROMS_TEMP_FILES[@]/#$err_output/}")
+  rm -f "$err_output"
+
+  echo "$output"
+  return $exit_code
+}
+
 _remote_roms_write_rclone_config() {
-  # Write rclone config file
+  # Write rclone config file with secure permissions
   # USAGE: _remote_roms_write_rclone_config "$config_file" "$section" "$url" "$user" "$pass"
 
   local config_file="$1"
@@ -33,15 +190,35 @@ _remote_roms_write_rclone_config() {
   local user="$4"
   local pass="$5"
 
-  local obscured_pass=$(rclone obscure "$pass" 2>/dev/null ; echo "$pass")
+  # Create config file with restricted permissions BEFORE writing sensitive data
+  touch "$config_file"
+  chmod 600 "$config_file" || {
+    log e "Failed to set permissions on rclone config"
+    return 1
+  }
 
-  echo "[$section]" > "$config_file"
-  echo "type = webdav" >> "$config_file"
-  echo "url = $url" >> "$config_file"
-  echo "vendor = other" >> "$config_file"
-  echo "user = $user" >> "$config_file"
-  echo "pass = $obscured_pass" >> "$config_file"
+  # Obscure password for rclone (rclone uses reversible obfuscation, NOT encryption)
+  # This is not security - it only prevents casual shoulder-surfing of the config file
+  local obscured_pass
+  obscured_pass=$(rclone obscure "$pass" 2>/dev/null) || obscured_pass="$pass"
+
+  # Write config to restricted file
+  {
+    echo "[$section]"
+    echo "type = webdav"
+    echo "url = $url"
+    echo "vendor = other"
+    echo "user = $user"
+    echo "pass = $obscured_pass"
+  } > "$config_file"
+
+  # Verify and re-enforce permissions
+  chmod 600 "$config_file" || {
+    log e "Failed to enforce permissions on rclone config"
+    return 1
+  }
 }
+
 
 # ============================================
 # Configuration Functions
@@ -50,6 +227,7 @@ _remote_roms_write_rclone_config() {
 remote_roms_init_config() {
   # Initialize remote ROMs configuration if not present
   # USAGE: remote_roms_init_config
+  # Returns: 0 on success, 1 on failure
 
   if ! jq -e '.remote_roms' "$rd_conf" > /dev/null 2>&1; then
     log i "Creating remote_roms configuration"
@@ -60,23 +238,41 @@ remote_roms_init_config() {
       "systems": {},
       "global_enabled": false
     }'
-    jq --argjson config "$default_config" '.remote_roms = $config' "$rd_conf" > "$rd_conf.tmp" ; mv "$rd_conf.tmp" "$rd_conf"
+    
+    if ! jq --argjson config "$default_config" '.remote_roms = $config' "$rd_conf" > "$rd_conf.tmp"; then
+      log e "Failed to create remote_roms config"
+      rm -f "$rd_conf.tmp"
+      return 1
+    fi
+    
+    if ! mv "$rd_conf.tmp" "$rd_conf"; then
+      log e "Failed to update config file"
+      rm -f "$rd_conf.tmp"
+      return 1
+    fi
   fi
+  return 0
 }
 
 remote_roms_get_setting() {
   # Get a remote ROMs setting value (global or system-specific)
   # USAGE: value=$(remote_roms_get_setting "setting_name")
   # USAGE: value=$(remote_roms_get_setting "$system" "property")
+  # Returns: Setting value or empty string; exit code 0 always
 
   if [[ $# -eq 1 ]]; then
     # Global setting
-    jq -r ".remote_roms.$1 // empty" "$rd_conf"
+    jq -r ".remote_roms.$1 // empty" "$rd_conf" 2>/dev/null || echo ""
   else
-    # System-specific setting
+    # System-specific setting - validate system name
     local system="$1"
     local property="$2"
-    jq -r ".remote_roms.systems[\"$system\"].$property // empty" "$rd_conf"
+    
+    if ! _remote_roms_validate_system_name "$system"; then
+      return 0  # Return empty on invalid system name
+    fi
+    
+    jq -r ".remote_roms.systems[\"$system\"].$property // empty" "$rd_conf" 2>/dev/null || echo ""
   fi
 }
 
@@ -84,17 +280,50 @@ remote_roms_set_setting() {
   # Set a remote ROMs setting value (global or system-specific)
   # USAGE: remote_roms_set_setting "setting_name" "value"
   # USAGE: remote_roms_set_setting "$system" "property" "value"
+  # Returns: 0 on success, 1 on failure
+
+  if ! _remote_roms_lock_config; then
+    log e "Failed to acquire config lock"
+    return 1
+  fi
+  
   if [[ $# -eq 2 ]]; then
     # Global setting
-    jq --arg val "$2" ".remote_roms.$1 = \$val" "$rd_conf" > "$rd_conf.tmp" ; mv "$rd_conf.tmp" "$rd_conf"
+    if ! jq --arg val "$2" ".remote_roms.$1 = \$val" "$rd_conf" > "$rd_conf.tmp"; then
+      log e "Failed to update setting $1"
+      rm -f "$rd_conf.tmp"
+      _remote_roms_unlock_config
+      return 1
+    fi
   else
     # System-specific setting
     local system="$1"
     local property="$2"
     local value="$3"
-    jq --arg s "$system" --arg p "$property" --arg v "$value" \
-      '.remote_roms.systems[$s][$p] = $v' "$rd_conf" > "$rd_conf.tmp" ; mv "$rd_conf.tmp" "$rd_conf"
+    
+    if ! _remote_roms_validate_system_name "$system"; then
+      _remote_roms_unlock_config
+      return 1
+    fi
+    
+    if ! jq --arg s "$system" --arg p "$property" --arg v "$value" \
+      '.remote_roms.systems[$s][$p] = $v' "$rd_conf" > "$rd_conf.tmp"; then
+      log e "Failed to update setting $system.$property"
+      rm -f "$rd_conf.tmp"
+      _remote_roms_unlock_config
+      return 1
+    fi
   fi
+  
+  if ! mv "$rd_conf.tmp" "$rd_conf"; then
+    log e "Failed to commit config changes"
+    rm -f "$rd_conf.tmp"
+    _remote_roms_unlock_config
+    return 1
+  fi
+  
+  _remote_roms_unlock_config
+  return 0
 }
 
 remote_roms_get_webdav_creds() {
@@ -118,11 +347,29 @@ remote_roms_get_webdav_creds() {
 remote_roms_save_webdav_config() {
   # Save WebDAV connection settings
   # USAGE: remote_roms_save_webdav_config "$url" "$user" "$pass"
+  # Returns: 0 on success, 1 on failure
 
-  remote_roms_set_setting "webdav_url" "$1"
-  remote_roms_set_setting "webdav_user" "$2"
-  remote_roms_set_setting "webdav_pass" "$3"
+  local url="$1"
+  local user="$2"
+  local pass="$3"
+  
+  # Validate inputs
+  if ! _remote_roms_validate_webdav_url "$url"; then
+    return 1
+  fi
+  
+  if [[ -z "$user" ]]; then
+    log e "WebDAV username cannot be empty"
+    return 1
+  fi
+  
+  # Save settings
+  remote_roms_set_setting "webdav_url" "$url" || return 1
+  remote_roms_set_setting "webdav_user" "$user" || return 1
+  remote_roms_set_setting "webdav_pass" "$pass" || return 1
+  
   log i "WebDAV configuration saved"
+  return 0
 }
 
 remote_roms_test_connection() {
@@ -145,15 +392,23 @@ remote_roms_test_connection() {
   fi
 
   # Create temporary rclone config
-  local rclone_config=$(mktemp)
-  _remote_roms_write_rclone_config "$rclone_config" "webdav-test" "$url" "$user" "$pass"
+  local rclone_config
+  rclone_config=$(mktemp) || {
+    echo "connection_failed"
+    return 1
+  }
+  _REMOTE_ROMS_TEMP_RCLONE_CONFIG="$rclone_config"
+
+  if ! _remote_roms_write_rclone_config "$rclone_config" "webdav-test" "$url" "$user" "$pass"; then
+    echo "connection_failed"
+    return 1
+  fi
 
   # Test connection with timeout
   local rclone_output
-  rclone_output=$(RCLONE_CONFIG="$rclone_config" rclone ls "webdav-test:/" --max-depth 1 --contimeout 10s --timeout 10s 2>&1)
+  rclone_output=$(RCLONE_CONFIG="$rclone_config" rclone ls "webdav-test:/" --max-depth 1 \
+    --contimeout ${REMOTE_ROMS_RCLONE_CONNECT_TIMEOUT}s --timeout ${REMOTE_ROMS_RCLONE_TIMEOUT}s 2>&1)
   local rclone_exit_code=$?
-
-  rm -f "$rclone_config"
 
   if [[ $rclone_exit_code -eq 0 ]]; then
     echo "connected"
@@ -171,34 +426,97 @@ remote_roms_test_connection() {
 remote_roms_add_system() {
   # Add a system to remote ROMs configuration
   # USAGE: remote_roms_add_system "$system" "$remote_path"
+  # Returns: 0 on success, 1 on failure
 
   local system="$1"
   local remote_path="$2"
 
-  local system_obj=$(jq -n \
+  # Validate inputs
+  if ! _remote_roms_validate_system_name "$system"; then
+    return 1
+  fi
+  
+  if ! _remote_roms_validate_remote_path "$remote_path"; then
+    return 1
+  fi
+
+  if ! _remote_roms_lock_config; then
+    log e "Failed to acquire config lock"
+    return 1
+  fi
+
+  local system_obj
+  system_obj=$(jq -n \
     --arg system "$system" \
     --arg remote_path "$remote_path" \
     '{
       "system": $system,
       "remote_path": $remote_path,
       "enabled": true
-    }')
+    }') || {
+    _remote_roms_unlock_config
+    log e "Failed to create system object"
+    return 1
+  }
 
-  jq --arg system "$system" --argjson obj "$system_obj" '.remote_roms.systems[$system] = $obj' "$rd_conf" > "$rd_conf.tmp" ; mv "$rd_conf.tmp" "$rd_conf"
+  if ! jq --arg system "$system" --argjson obj "$system_obj" '.remote_roms.systems[$system] = $obj' "$rd_conf" > "$rd_conf.tmp"; then
+    _remote_roms_unlock_config
+    rm -f "$rd_conf.tmp"
+    log e "Failed to add system $system"
+    return 1
+  fi
+
+  if ! mv "$rd_conf.tmp" "$rd_conf"; then
+    _remote_roms_unlock_config
+    rm -f "$rd_conf.tmp"
+    log e "Failed to commit system addition"
+    return 1
+  fi
+
+  _remote_roms_unlock_config
   log i "Added remote ROM system: $system"
+  return 0
 }
 
 remote_roms_remove_system() {
   # Remove a system from remote ROMs configuration
   # USAGE: remote_roms_remove_system "$system"
+  # Returns: 0 on success, 1 on failure
 
   local system="$1"
 
-  # Clear cache
-  rm -rf "${REMOTE_ROMS_CACHE_DIR}/${system}"
+  # Validate system name
+  if ! _remote_roms_validate_system_name "$system"; then
+    return 1
+  fi
 
-  jq --arg s "$system" 'del(.remote_roms.systems[$s])' "$rd_conf" > "$rd_conf.tmp" ; mv "$rd_conf.tmp" "$rd_conf"
+  # Clear cache
+  rm -rf "${REMOTE_ROMS_CACHE_DIR:?}/${system}" || {
+    log w "Failed to remove cache for $system"
+  }
+
+  if ! _remote_roms_lock_config; then
+    log e "Failed to acquire config lock"
+    return 1
+  fi
+
+  if ! jq --arg s "$system" 'del(.remote_roms.systems[$s])' "$rd_conf" > "$rd_conf.tmp"; then
+    _remote_roms_unlock_config
+    rm -f "$rd_conf.tmp"
+    log e "Failed to remove system $system"
+    return 1
+  fi
+
+  if ! mv "$rd_conf.tmp" "$rd_conf"; then
+    _remote_roms_unlock_config
+    rm -f "$rd_conf.tmp"
+    log e "Failed to commit system removal"
+    return 1
+  fi
+
+  _remote_roms_unlock_config
   log i "Removed remote ROM system: $system"
+  return 0
 }
 
 remote_roms_get_available_systems() {
@@ -241,7 +559,7 @@ remote_roms_get_available_systems() {
 remote_roms_discover_systems() {
   # Auto-discover systems on WebDAV server
   # USAGE: discovered=$(remote_roms_discover_systems)
-  # Returns: JSON object with discovered systems and their paths
+  # Returns: 0 on success (JSON object), 1 on failure (empty JSON)
 
   eval $(remote_roms_get_webdav_creds)
 
@@ -251,8 +569,17 @@ remote_roms_discover_systems() {
   fi
 
   # Create temporary rclone config
-  local rclone_config=$(mktemp)
-  _remote_roms_write_rclone_config "$rclone_config" "webdav-discover" "$url" "$user" "$pass"
+  local rclone_config
+  rclone_config=$(mktemp) || {
+    echo "{}"
+    return 1
+  }
+  _REMOTE_ROMS_TEMP_RCLONE_CONFIG="$rclone_config"
+
+  if ! _remote_roms_write_rclone_config "$rclone_config" "webdav-discover" "$url" "$user" "$pass"; then
+    echo "{}"
+    return 1
+  fi
 
   local available_systems=$(remote_roms_get_available_systems)
   local discovered="{}"
@@ -263,6 +590,11 @@ remote_roms_discover_systems() {
 
     while IFS= read -r folder; do
       [[ -z "$folder" ]] && continue
+
+      # Validate folder name before processing
+      if ! _remote_roms_validate_system_name "$folder"; then
+        continue
+      fi
 
       local full_path="${scan_path:1}$folder"
       [[ "$scan_path" == "/" ]] && full_path="$folder"
@@ -280,8 +612,8 @@ remote_roms_discover_systems() {
     done <<< "$folders"
   done
 
-  rm -f "$rclone_config"
   echo "$discovered"
+  return 0
 }
 
 # ============================================
@@ -305,10 +637,15 @@ remote_roms_generate_rclone_config() {
   fi
 
   local rclone_dir="$XDG_CONFIG_HOME/rclone"
-  mkdir -p "$rclone_dir"
+  mkdir -p "$rclone_dir" || {
+    log e "Failed to create rclone directory"
+    return 1
+  }
 
-  _remote_roms_write_rclone_config "$rclone_dir/rclone.conf" "retrodeck-webdav" "$url" "$user" "$pass"
-  chmod 600 "$rclone_dir/rclone.conf"
+  if ! _remote_roms_write_rclone_config "$rclone_dir/rclone.conf" "retrodeck-webdav" "$url" "$user" "$pass"; then
+    log e "Failed to write rclone config"
+    return 1
+  fi
 }
 
 remote_roms_fetch_gamelist() {
@@ -317,8 +654,14 @@ remote_roms_fetch_gamelist() {
   # Returns: 0 on success, 1 on failure
 
   local system="$1"
+  
+  # Validate system name
+  if ! _remote_roms_validate_system_name "$system"; then
+    return 1
+  fi
+
   local cache_dir="${REMOTE_ROMS_CACHE_DIR}/${system}"
-  mkdir -p "$cache_dir"
+  mkdir -p "$cache_dir" || return 1
   local gamelist_path="${cache_dir}/${REMOTE_ROMS_GAMELIST_FILE}"
 
   remote_roms_log_debug "fetch_gamelist: fetching for $system"
@@ -332,13 +675,17 @@ remote_roms_fetch_gamelist() {
   remote_roms_generate_rclone_config || return 1
 
   # Try to fetch gamelist.xml from remote
-  local temp_file=$(mktemp)
+  local temp_file
+  temp_file=$(mktemp) || return 1
+  _remote_roms_register_temp_file "$temp_file"
+
   if rclone copyto "retrodeck-webdav:${remote_path}/gamelist.xml" "$temp_file" 2>/dev/null; then
-    mv "$temp_file" "$gamelist_path"
+    mv "$temp_file" "$gamelist_path" || return 1
     remote_roms_log_debug "fetch_gamelist: downloaded gamelist.xml for $system"
+    # Remove from tracking since it's been moved (exact match only)
+    _REMOTE_ROMS_TEMP_FILES=("${_REMOTE_ROMS_TEMP_FILES[@]/#$temp_file/}")
     return 0
   else
-    rm -f "$temp_file"
     remote_roms_log_debug "fetch_gamelist: no gamelist.xml found for $system"
     return 1
   fi
@@ -429,7 +776,10 @@ remote_roms_build_listing_from_directory() {
   remote_roms_generate_rclone_config || return 1
 
   # Fetch listing with rclone lsjson
-  local temp_file=$(mktemp)
+  local temp_file
+  temp_file=$(mktemp) || return 1
+  _remote_roms_register_temp_file "$temp_file"
+
   if rclone lsjson "retrodeck-webdav:${remote_path}" --recursive > "$temp_file" 2>/dev/null; then
     # Filter only files and format
     local listing=$(jq '[.[] | select(.IsDir == false) | {
@@ -439,11 +789,9 @@ remote_roms_build_listing_from_directory() {
       "path": .Path,
       "modtime": .ModTime
     }]' "$temp_file")
-    rm -f "$temp_file"
     echo "$listing"
     return 0
   else
-    rm -f "$temp_file"
     echo "[]"
     return 1
   fi
@@ -580,20 +928,28 @@ remote_roms_download_rom() {
   # Ensure rclone config exists
   remote_roms_generate_rclone_config || return 1
 
-  # Create temp file for atomic download
+  # Create temp file for atomic download using PID for uniqueness
   local temp_file="${local_path}.tmp.$$"
-  mkdir -p "$(dirname "$local_path")"
+  mkdir -p "$(dirname "$local_path")" || {
+    log e "Failed to create directory for $rom_name"
+    return 1
+  }
+  _remote_roms_register_temp_file "$temp_file"
 
   log i "Downloading $rom_name from remote..."
 
-  # Use rclone copyto
-  if rclone copyto "retrodeck-webdav:${remote_path}/${rom_name}" "$temp_file" --progress 2>/dev/null; then
-    mv "$temp_file" "$local_path"
-    log i "Downloaded $rom_name successfully"
-    echo "$local_path"
-    return 0
+  # Use rclone copyto with timeouts
+  if rclone copyto "retrodeck-webdav:${remote_path}/${rom_name}" "$temp_file" \
+    --progress --contimeout ${REMOTE_ROMS_DOWNLOAD_CONNECT_TIMEOUT}s --timeout ${REMOTE_ROMS_DOWNLOAD_TIMEOUT}s 2>/dev/null; then
+    if mv "$temp_file" "$local_path"; then
+      log i "Downloaded $rom_name successfully"
+      echo "$local_path"
+      return 0
+    else
+      log e "Failed to move downloaded file to $local_path"
+      return 1
+    fi
   else
-    rm -f "$temp_file"
     log e "Failed to download $rom_name"
     return 1
   fi
@@ -606,8 +962,14 @@ remote_roms_download_rom() {
 remote_roms_browse_system() {
   # Show ROM browser dialog for a system
   # USAGE: selected_file=$(remote_roms_browse_system "$system")
+  # Returns: Selected file or empty on cancel/failure
 
   local system="$1"
+  
+  # Validate system name
+  if ! _remote_roms_validate_system_name "$system"; then
+    return 1
+  fi
 
   remote_roms_log_debug "browse_system: opening browser for $system"
 
@@ -620,8 +982,8 @@ remote_roms_browse_system() {
     return 1
   fi
 
-  # For large libraries (>200), use alphabetical bucketing
-  if [[ "$count" -gt 200 ]]; then
+  # For large libraries, use alphabetical bucketing
+  if [[ "$count" -gt $REMOTE_ROMS_ALPHABETICAL_BUCKET_THRESHOLD ]]; then
     remote_roms_browse_alphabetical "$system" "$listing"
   else
     remote_roms_show_game_list "$system" "$listing"
@@ -689,9 +1051,15 @@ remote_roms_show_game_list() {
 remote_roms_search_dialog() {
   # Search-based ROM finder
   # USAGE: selected_file=$(remote_roms_search_dialog "$system" ["$query"])
+  # Returns: Selected file or empty on cancel/failure
 
   local system="$1"
   local query="${2:-}"
+
+  # Validate system name
+  if ! _remote_roms_validate_system_name "$system"; then
+    return 1
+  fi
 
   # Prompt for search if no query provided
   if [[ -z "$query" ]]; then
@@ -716,6 +1084,7 @@ remote_roms_search_dialog() {
   elif [[ "$match_count" -eq 1 ]]; then
     # Auto-select single match
     echo "$matches" | jq -r '.[0].name'
+    return 0
   else
     # Show matches
     remote_roms_show_game_list "$system" "$matches"
@@ -725,12 +1094,20 @@ remote_roms_search_dialog() {
 remote_roms_virtual_browser_menu() {
   # Main entry point for virtual browser
   # USAGE: local_path=$(remote_roms_virtual_browser_menu "$system")
-  # Returns: Path to downloaded/local ROM
+  # Returns: 0 on success with path, 1 on failure
 
   local system="$1"
 
+  # Validate system name
+  if ! _remote_roms_validate_system_name "$system"; then
+    return 1
+  fi
+
   # Initialize and check config
-  remote_roms_init_config
+  if ! remote_roms_init_config; then
+    log e "Failed to initialize remote ROMs config"
+    return 1
+  fi
 
   # Check if system is enabled (global + system setting)
   local global_enabled=$(remote_roms_get_setting "global_enabled")
@@ -754,16 +1131,16 @@ remote_roms_virtual_browser_menu() {
 
   case "$action" in
     browse)
-      selected_file=$(remote_roms_browse_system "$system")
+      selected_file=$(remote_roms_browse_system "$system") || return 1
       ;;
     search)
-      selected_file=$(remote_roms_search_dialog "$system")
+      selected_file=$(remote_roms_search_dialog "$system") || return 1
       ;;
     latest)
-      # Show last 50 added
+      # Show recently added games
       local listing=$(remote_roms_get_system_listing "$system")
-      local latest=$(echo "$listing" | jq 'sort_by(.modtime) | reverse | .[0:50]')
-      selected_file=$(remote_roms_show_game_list "$system" "$latest")
+      local latest=$(echo "$listing" | jq --argjson count "$REMOTE_ROMS_LATEST_GAMES_COUNT" 'sort_by(.modtime) | reverse | .[0:$count]')
+      selected_file=$(remote_roms_show_game_list "$system" "$latest") || return 1
       ;;
     *)
       return 1
@@ -780,19 +1157,34 @@ remote_roms_create_esde_integration() {
   # Create ES-DE integration files for remote ROM browsing
   # Creates a "Remote" folder with gamelist entry that triggers the virtual browser
   # USAGE: remote_roms_create_esde_integration "$system"
+  # Returns: 0 on success, 1 on failure
 
   local system="$1"
+  
+  # Validate system name
+  if ! _remote_roms_validate_system_name "$system"; then
+    return 1
+  fi
+
   local system_roms_path="${roms_path}/${system}"
   local remote_folder="${system_roms_path}/remote"
 
   # Create remote folder
-  mkdir -p "$remote_folder"
+  mkdir -p "$remote_folder" || {
+    log e "Failed to create remote folder for $system"
+    return 1
+  }
 
   # Create trigger file that opens the virtual browser when "launched"
   # This is a placeholder file that run_game.sh detects
   local trigger_file="${remote_folder}/Browse Remote ROMs.remote_trigger"
-  echo "# This file triggers the virtual browser when selected in ES-DE" > "$trigger_file"
-  echo "# System: $system" >> "$trigger_file"
+  {
+    echo "# This file triggers the virtual browser when selected in ES-DE"
+    echo "# System: $system"
+  } > "$trigger_file" || {
+    log e "Failed to create trigger file for $system"
+    return 1
+  }
 
   # Create gamelist.xml entry for the remote folder if gamelist exists
   local gamelist_path="${system_roms_path}/gamelist.xml"
@@ -800,8 +1192,11 @@ remote_roms_create_esde_integration() {
     # Check if entry already exists
     if ! grep -q "Browse Remote ROMs" "$gamelist_path" 2>/dev/null; then
       # Add entry before closing </gameList> tag
-      local temp_gamelist=$(mktemp)
-      awk '
+      local temp_gamelist
+      temp_gamelist=$(mktemp) || return 1
+      _remote_roms_register_temp_file "$temp_gamelist"
+
+      if awk '
         /<\/gameList>/ {
           print "  <game>"
           print "    <path>./remote/Browse Remote ROMs.remote_trigger</path>"
@@ -812,31 +1207,54 @@ remote_roms_create_esde_integration() {
           print "  </game>"
         }
         { print }
-      ' "$gamelist_path" > "$temp_gamelist"
-      mv "$temp_gamelist" "$gamelist_path"
+      ' "$gamelist_path" > "$temp_gamelist"; then
+        if mv "$temp_gamelist" "$gamelist_path"; then
+          # Remove from tracking since it's been moved (exact match only)
+          _REMOTE_ROMS_TEMP_FILES=("${_REMOTE_ROMS_TEMP_FILES[@]/#$temp_gamelist/}")
+        else
+          log e "Failed to update gamelist.xml for $system"
+          return 1
+        fi
+      else
+        log e "Failed to process gamelist.xml for $system"
+        return 1
+      fi
     fi
   fi
 
   log i "ES-DE integration created for $system"
+  return 0
 }
 
 remote_roms_remove_esde_integration() {
   # Remove ES-DE integration files for a system
   # USAGE: remote_roms_remove_esde_integration "$system"
+  # Returns: 0 on success, 1 on failure
 
   local system="$1"
+  
+  # Validate system name
+  if ! _remote_roms_validate_system_name "$system"; then
+    return 1
+  fi
+
   local remote_folder="${roms_path}/${system}/remote"
 
   # Remove remote folder and trigger file
   if [[ -d "$remote_folder" ]]; then
-    rm -rf "$remote_folder"
+    rm -rf "$remote_folder" || {
+      log w "Failed to remove remote folder for $system"
+    }
   fi
 
   # Remove from gamelist.xml if present
   local gamelist_path="${roms_path}/${system}/gamelist.xml"
   if [[ -f "$gamelist_path" ]] && grep -q "Browse Remote ROMs" "$gamelist_path" 2>/dev/null; then
-    local temp_gamelist=$(mktemp)
-    awk '
+    local temp_gamelist
+    temp_gamelist=$(mktemp) || return 1
+    _remote_roms_register_temp_file "$temp_gamelist"
+
+    if awk '
       /<game>/ { in_game=1; game_block=$0; next }
       in_game {
         game_block=game_block "\n" $0
@@ -850,17 +1268,40 @@ remote_roms_remove_esde_integration() {
         next
       }
       { print }
-    ' "$gamelist_path" > "$temp_gamelist"
-    mv "$temp_gamelist" "$gamelist_path"
+    ' "$gamelist_path" > "$temp_gamelist"; then
+      if mv "$temp_gamelist" "$gamelist_path"; then
+        # Remove from tracking since it's been moved (exact match only)
+        _REMOTE_ROMS_TEMP_FILES=("${_REMOTE_ROMS_TEMP_FILES[@]/#$temp_gamelist/}")
+      else
+        log w "Failed to update gamelist.xml for $system"
+      fi
+    else
+      log w "Failed to process gamelist.xml for $system"
+    fi
   fi
 
   log i "ES-DE integration removed for $system"
+  return 0
 }
 
 remote_roms_set_system_auto_refresh() {
   # Set auto_refresh flag for a system
   # USAGE: remote_roms_set_system_auto_refresh "$system" "true|false"
+  # Returns: 0 on success, 1 on failure
+  
   local system="$1"
   local value="$2"
+  
+  # Validate system name
+  if ! _remote_roms_validate_system_name "$system"; then
+    return 1
+  fi
+  
+  # Validate value
+  if [[ "$value" != "true" && "$value" != "false" ]]; then
+    log e "Invalid auto_refresh value: '$value' (must be 'true' or 'false')"
+    return 1
+  fi
+  
   remote_roms_set_setting "$system" "auto_refresh" "$value"
 }
