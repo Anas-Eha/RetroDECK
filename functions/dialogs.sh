@@ -1271,9 +1271,9 @@ configurator_remote_dialog() {
   [[ "$global_enabled" == "true" ]] && status_text="Enabled"
 
   local menu_options=(
+    "Sync Systems" "Auto-discover and enable systems from WebDAV"
+    "Manage Systems" "View and configure individual remote systems"
     "Connection Settings" "Configure WebDAV server URL, username and password"
-    "Manage Mounts" "Configure remote folders (auto-discover, mount/unmount)"
-    "Repair All Mounts" "Fix stale mounts after Quick Resume or network issues"
     "Test Connection" "Test the WebDAV connection"
   )
 
@@ -1296,11 +1296,11 @@ configurator_remote_dialog() {
     "Connection Settings")
       configurator_remote_roms_connection_dialog
       ;;
-    "Manage Mounts")
-      configurator_remote_roms_mounts_dialog
+    "Sync Systems")
+      configurator_remote_roms_refresh_dialog
       ;;
-    "Repair All Mounts")
-      configurator_remote_roms_repair_dialog
+    "Manage Systems")
+      configurator_remote_roms_manage_systems_list_dialog
       ;;
     "Test Connection")
       configurator_remote_roms_test_dialog
@@ -1353,158 +1353,27 @@ configurator_remote_roms_connection_dialog() {
   configurator_remote_dialog
 }
 
+configurator_remote_roms_systems_dialog() {
+  # DEPRECATED: This function is kept for compatibility but redirects to refresh
+  # The new workflow combines discovery + refresh in one action
+  # USAGE: configurator_remote_roms_systems_dialog
+
+  log i "Opening Remote ROMs systems dialog (redirecting to refresh)"
+  configurator_remote_roms_refresh_dialog
+}
+
+# Legacy alias for compatibility
 configurator_remote_roms_mounts_dialog() {
-  # Dialog for managing individual system mounts with auto-discovery
-  # USAGE: configurator_remote_roms_mounts_dialog
-
-  log i "Opening Remote ROMs mounts dialog"
-
-  # First, try to auto-discover remote folders
-  configurator_remote_roms_discover_dialog
+  configurator_remote_roms_systems_dialog
 }
 
 configurator_remote_roms_discover_dialog() {
-  # Auto-discover remote folders and show management interface
-  # Discovers system folders from WebDAV and auto-enables them
+  # DEPRECATED: Discovery is now part of the refresh workflow
+  # This function redirects to the new combined refresh dialog
   # USAGE: configurator_remote_roms_discover_dialog
 
-  log i "Opening remote ROMs discovery dialog"
-
-  # Check if we have connection settings
-  local url=$(remote_roms_get_setting "webdav_url")
-  if [[ -z "$url" ]]; then
-    configurator_generic_dialog "RetroDECK Configurator - No Connection" "<span foreground='$purple'><b>No WebDAV connection configured.</b></span>\n\nPlease set up Connection Settings first."
-    configurator_remote_dialog
-    return
-  fi
-
-  # Discovery: Find system folders on WebDAV server
-  local discovered_map=""  # Format: "system:path\nsystem:path"
-
-  (
-    echo "10"
-    echo "# Connecting to WebDAV..."
-
-    local rclone_config=$(mktemp)
-    local user=$(remote_roms_get_setting "webdav_user")
-    local pass=$(remote_roms_get_setting "webdav_pass")
-    local obscured_pass=$(rclone obscure "$pass" 2>/dev/null || echo "$pass")
-
-    echo "[webdav-discover]" > "$rclone_config"
-    echo "type = webdav" >> "$rclone_config"
-    echo "url = $url" >> "$rclone_config"
-    echo "vendor = other" >> "$rclone_config"
-    echo "user = $user" >> "$rclone_config"
-    echo "pass = $obscured_pass" >> "$rclone_config"
-
-    echo "30"
-    echo "# Scanning for system folders..."
-
-    local available_systems=$(remote_roms_get_available_systems)
-    local found_systems=""
-
-    # Scan root and common subfolders for system folders
-    for scan_path in "/" "/roms" "/games" "/library"; do
-      local folders=$(RCLONE_CONFIG="$rclone_config" rclone lsf "webdav-discover:$scan_path" --max-depth 1 --dirs-only 2>/dev/null | sed 's|/$||')
-
-      while IFS= read -r folder; do
-        [[ -z "$folder" ]] && continue
-
-        local full_path="${scan_path:1}$folder"  # Remove leading /
-        [[ "$scan_path" == "/" ]] && full_path="$folder"
-
-        # Check if folder name matches a known system
-        for sys in $available_systems; do
-          if [[ "$folder" == "$sys" ]]; then
-            # Only add if not already found (prefer shorter paths)
-            if ! echo "$found_systems" | grep -q "^${sys}:"; then
-              found_systems="${found_systems}${sys}:${full_path}\n"
-            fi
-            break
-          fi
-        done
-      done <<< "$folders"
-    done
-
-    rm -f "$rclone_config"
-
-    echo "100"
-    echo "# Discovery complete"
-
-    # Save results
-    printf "%b" "$found_systems" > /tmp/remote_roms_discovered_map
-  ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
-    --title "RetroDECK - Discovering Remote Folders" \
-    --text="Scanning WebDAV server for available folders..." \
-    --width=400 --height=100
-
-  # Load discovered systems
-  discovered_map=$(cat /tmp/remote_roms_discovered_map 2>/dev/null)
-  rm -f /tmp/remote_roms_discovered_map
-
-  log d "Discovered systems map: $discovered_map"
-
-  # Auto-enable newly discovered systems
-  local auto_enabled_count=0
-  while IFS=':' read -r system path; do
-    [[ -z "$system" ]] && continue
-
-    # Check if already configured
-    local existing_config=$(remote_roms_get_mounts | jq --arg s "$system" -r '.[$s] // empty')
-    if [[ -z "$existing_config" ]]; then
-      log i "Auto-enabling remote ROMs for $system (path: $path)"
-      remote_roms_add_mount "$system" "$path"
-      remote_roms_set_mount_automount "$system" "true"
-      remote_roms_mount_system "$system" 2>/dev/null || true
-      ((auto_enabled_count++))
-    fi
-  done <<< "$discovered_map"
-
-  # Show summary if new systems were added
-  if [[ $auto_enabled_count -gt 0 ]]; then
-    configurator_generic_dialog "RetroDECK Configurator - Systems Discovered" "<span foreground='$purple'><b>Found $auto_enabled_count new system(s) on your WebDAV server!</b></span>\n\nThey have been automatically enabled with auto-mount.\n\nThe systems will be mounted automatically on future RetroDECK startups."
-  fi
-
-  # Build menu from all configured mounts
-  local menu_options=()
-  local configured_systems=$(remote_roms_get_mounts | jq -r 'keys[]')
-
-  while IFS= read -r system; do
-    [[ -z "$system" ]] && continue
-
-    local config=$(remote_roms_get_mounts | jq --arg s "$system" -r '.[$s]')
-    local path=$(echo "$config" | jq -r '.remote_path // empty')
-    local is_mounted="false"
-    mountpoint -q "$roms_path/$system/remote" 2>/dev/null && is_mounted="true"
-    local automount=$(echo "$config" | jq -r '.automount // false')
-
-    local status="Configured"
-    [[ "$is_mounted" == "true" ]] && status="Mounted"
-    [[ "$automount" == "true" ]] && status="${status} (Auto)"
-
-    menu_options+=("$system" "$status - Path: $path")
-  done <<< "$configured_systems"
-
-  if [[ ${#menu_options[@]} -eq 0 ]]; then
-    configurator_generic_dialog "RetroDECK Configurator - No Folders" "<span foreground='$purple'><b>No matching folders found on WebDAV server.</b></span>\n\nMake sure your server has folders that match RetroDECK system names (gba, snes, ps2, etc.)"
-    configurator_remote_dialog
-    return
-  fi
-
-  choice=$(rd_zenity --list \
-    --title "RetroDECK Configurator - Manage Remote Folders" \
-    --cancel-label="Back" --ok-label="Manage" \
-    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
-    --width=1000 --height=700 \
-    --column="System" --column="Status" \
-    "${menu_options[@]}")
-
-  if [[ $? -ne 0 || -z "$choice" ]]; then
-    configurator_remote_dialog
-    return
-  fi
-
-  configurator_remote_roms_manage_system_dialog "$choice"
+  log i "Opening remote ROMs discovery dialog (redirecting to refresh)"
+  configurator_remote_roms_refresh_dialog
 }
 
 configurator_remote_roms_test_dialog() {
@@ -1557,37 +1426,33 @@ configurator_remote_roms_manage_system_dialog() {
     refresh=false  # Will be set to true to refresh the dialog
     log i "Opening manage dialog for $system"
 
-  # Check current status
-  local existing_config=$(remote_roms_get_mounts | jq --arg s "$system" -r '.[$s] // empty')
+  # Check current status 
+  local existing_config=$(jq -r --arg s "$system" '.remote_roms.systems[$s] // empty' "$rd_conf")
   local is_configured=$([[ -n "$existing_config" ]] && echo "true" || echo "false")
-  local is_mounted=$(remote_roms_is_mounted "$system")
-  local automount="false"
-  [[ "$is_configured" == "true" ]] && automount=$(echo "$existing_config" | jq -r '.automount // false')
+  local auto_refresh="false"
+  [[ "$is_configured" == "true" ]] && auto_refresh=$(echo "$existing_config" | jq -r '.auto_refresh // false')
 
   # Build status text
   local status_text="Not configured"
   [[ "$is_configured" == "true" ]] && status_text="Configured"
-  [[ "$is_mounted" == "true" ]] && status_text="Mounted"
 
-  local automount_text="Off"
-  [[ "$automount" == "true" ]] && automount_text="On"
+  local auto_refresh_text="Off"
+  [[ "$auto_refresh" == "true" ]] && auto_refresh_text="On"
 
   # Determine available actions
   local menu_options=()
 
   if [[ "$is_configured" == "false" ]]; then
-    menu_options+=("Enable Remote ROMs" "Set up this folder for remote access")
+    menu_options+=("Enable Remote ROMs" "Set up this system for remote access")
   else
-    if [[ "$is_mounted" == "true" ]]; then
-      menu_options+=("Unmount" "Unmount this folder")
+    # Virtual Browser actions
+    menu_options+=("Browse ROMs" "Open virtual browser to view and download ROMs")
+    menu_options+=("Refresh Cache" "Update ROM listing from WebDAV server")
+    
+    if [[ "$auto_refresh" == "true" ]]; then
+      menu_options+=("Disable Auto-refresh" "Don't auto-refresh cache on startup")
     else
-      menu_options+=("Mount" "Mount this folder now")
-    fi
-
-    if [[ "$automount" == "true" ]]; then
-      menu_options+=("Disable Auto-mount" "Don't mount this folder automatically")
-    else
-      menu_options+=("Enable Auto-mount" "Mount this folder automatically on startup")
+      menu_options+=("Enable Auto-refresh" "Auto-refresh cache on startup")
     fi
 
     menu_options+=("Remove Configuration" "Stop using remote ROMs for this system")
@@ -1595,7 +1460,7 @@ configurator_remote_roms_manage_system_dialog() {
 
   choice=$(rd_zenity --list \
     --title "RetroDECK Configurator - Manage $system" \
-    --text="<span foreground='$purple'><b>System: $system</b></span>\n\nStatus: $status_text\nAuto-mount: $automount_text" \
+    --text="<span foreground='$purple'><b>System: $system</b></span>\n\nStatus: $status_text\nAuto-refresh: $auto_refresh_text" \
     --cancel-label="Back" --ok-label="Select" \
     --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
     --width=800 --height=500 \
@@ -1612,49 +1477,65 @@ configurator_remote_roms_manage_system_dialog() {
   # Handle the choice and refresh the dialog if needed
   case "$choice" in
     "Enable Remote ROMs")
-      # Add mount with automount enabled by default (minimal user involvement)
-      remote_roms_add_mount "$system" "$system"
-      remote_roms_set_mount_automount "$system" "true"
+      # Add system with auto-refresh enabled by default
+      remote_roms_add_system "$system" "$system"
+      remote_roms_set_system_auto_refresh "$system" "true"
+
+      # Create ES-DE integration (Remote folder + trigger file)
+      remote_roms_create_esde_integration "$system"
+
+      # Pre-fetch listing
+      if remote_roms_refresh_system_listing "$system"; then
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured and ready!</b></span>\n\nES-DE integration created.\n\nLook for '📡 Browse Remote ROMs' in your $system folder."
+      else
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nES-DE integration created. The cache will be refreshed when you browse."
+      fi
+      refresh=true
+      ;;
+    "Browse ROMs")
+      # Open virtual browser for this system
+      local selected_rom
+      selected_rom=$(remote_roms_virtual_browser_menu "$system")
       
-      # Try to mount immediately
-      if remote_roms_mount_system "$system"; then
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured and mounted!</b></span>\n\nThe folder is now ready to use and will auto-mount on startup."
-      else
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nThe folder will be auto-mounted on startup."
+      if [[ -n "$selected_rom" ]]; then
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>ROM Downloaded!</b></span>\n\nDownloaded: $(basename "$selected_rom")\n\nThe ROM is now available locally at:\n$selected_rom"
       fi
       refresh=true
       ;;
-    "Mount")
-      if remote_roms_mount_system "$system"; then
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system mounted successfully.</b></span>\n\nYou can now browse the remote folder in ES-DE."
-      else
-        configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>Failed to mount $system.</b></span>\n\nCheck the logs for details."
-      fi
+    "Refresh Cache")
+      (
+        echo "0"
+        echo "# Refreshing ROM listing..."
+        remote_roms_refresh_system_listing "$system"
+        echo "100"
+        echo "# Complete"
+      ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
+        --title "RetroDECK - Refreshing Cache" \
+        --text="Updating ROM listing for $system..." \
+        --width=400 --height=100
+      
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Cache refreshed for $system!</b></span>\n\nROM listing is now up to date."
       refresh=true
       ;;
-    "Unmount")
-      remote_roms_unmount_system "$system"
-      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system unmounted.</b></span>"
+    "Enable Auto-refresh")
+      remote_roms_set_system_auto_refresh "$system" "true"
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-refresh enabled for $system.</b></span>\n\nROM listing will be refreshed on startup."
       refresh=true
       ;;
-    "Enable Auto-mount")
-      remote_roms_set_mount_automount "$system" "true"
-      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-mount enabled for $system.</b></span>\n\nThis folder will be mounted automatically on startup."
-      refresh=true
-      ;;
-    "Disable Auto-mount")
-      remote_roms_set_mount_automount "$system" "false"
-      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-mount disabled for $system.</b></span>\n\nYou'll need to mount this folder manually."
+    "Disable Auto-refresh")
+      remote_roms_set_system_auto_refresh "$system" "false"
+      configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-refresh disabled for $system.</b></span>\n\nYou'll need to refresh the cache manually."
       refresh=true
       ;;
     "Remove Configuration")
       rd_zenity --question \
         --title "RetroDECK Configurator - Confirm Removal" \
         --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
-        --text="<span foreground='$purple'><b>Remove $system configuration?</b></span>\n\nThis will unmount the folder and remove all settings for this system."
+        --text="<span foreground='$purple'><b>Remove $system configuration?</b></span>\n\nThis will remove all settings and cached data for this system."
       if [[ $? -eq 0 ]]; then
-        remote_roms_remove_mount "$system"
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configuration removed.</b></span>"
+        remote_roms_remove_system "$system"
+        remote_roms_remove_esde_integration "$system"
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configuration removed.</b></span>\n\nThe system is no longer configured for remote ROMs."
       fi
       refresh=true
       ;;
@@ -1663,68 +1544,200 @@ configurator_remote_roms_manage_system_dialog() {
   done  # End of while loop - dialog refreshes if refresh=true
 }
 
-configurator_remote_roms_repair_dialog() {
-  # Dialog to repair all stale mounts after Quick Resume
-  # USAGE: configurator_remote_roms_repair_dialog
+configurator_remote_roms_refresh_dialog() {
+  # Combined discovery + sync dialog for Remote ROMs
+  # Discovers systems on WebDAV, lets user select which to enable, then refreshes all
+  # USAGE: configurator_remote_roms_refresh_dialog
 
-  log i "Opening Repair All Mounts dialog"
+  log i "Opening Sync Systems dialog (discovery + refresh)"
 
-  # Show progress while repairing
+  # First, test connection
+  local conn_status=$(remote_roms_test_connection)
+  if [[ "$conn_status" != "connected" ]]; then
+    case "$conn_status" in
+      "missing_config")
+        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>Configuration incomplete.</b></span>\n\nPlease configure WebDAV connection settings first."
+        ;;
+      "rclone_not_found")
+        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>rclone not found.</b></span>\n\nrclone is required for WebDAV connections."
+        ;;
+      *)
+        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check your WebDAV settings and try again."
+        ;;
+    esac
+    configurator_remote_dialog
+    return
+  fi
+
+  # Step 1: Discover systems on WebDAV server
+  local discovered="{}"
   (
     echo "10"
-    echo "# Checking mount health..."
-
-    local mounts=$(remote_roms_get_mounts)
-    local total=$(echo "$mounts" | jq 'length')
-    local repaired=0
-    local failed=0
-
-    if [[ "$total" -eq 0 ]]; then
-      echo "100"
-      echo "# No mounts configured"
-      echo "none" > /tmp/remote_roms_repair_result
-    else
-      echo "30"
-      echo "# Repairing mounts..."
-
-      # Call repair function and capture results
-      local result=$(remote_roms_repair_all_mounts 2>&1)
-
-      echo "90"
-      echo "# Finalizing..."
-
-      # Parse results
-      repaired=$(echo "$result" | grep -oP 'Repaired: \K[0-9]+' || echo "0")
-      failed=$(echo "$result" | grep -oP 'Failed: \K[0-9]+' || echo "0")
-
-      echo "100"
-      echo "# Complete"
-      echo "${repaired}|${failed}|${total}" > /tmp/remote_roms_repair_result
-    fi
+    echo "# Scanning WebDAV server for systems..."
+    discovered=$(remote_roms_discover_systems)
+    echo "$discovered" > /tmp/remote_roms_discovered
+    echo "50"
+    echo "# Discovery complete"
   ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
-    --title "RetroDECK - Repairing Mounts" \
-    --text="Checking and repairing remote ROM mounts..." \
+    --title "RetroDECK - Discovering Systems" \
+    --text="Searching for ROM systems on your WebDAV server..." \
     --width=400 --height=100
 
-  local result=$(cat /tmp/remote_roms_repair_result 2>/dev/null)
-  rm -f /tmp/remote_roms_repair_result
+  discovered=$(cat /tmp/remote_roms_discovered 2>/dev/null || echo "{}")
+  rm -f /tmp/remote_roms_discovered
 
-  case "$result" in
-    "none")
-      configurator_generic_dialog "RetroDECK Configurator - Repair Mounts" "<span foreground='$purple'><b>No mounts configured.</b></span>\n\nConfigure mounts first in Manage Mounts."
-      ;;
-    *)
-      local repaired=$(echo "$result" | cut -d'|' -f1)
-      local failed=$(echo "$result" | cut -d'|' -f2)
-      local total=$(echo "$result" | cut -d'|' -f3)
+  local discovered_count=$(echo "$discovered" | jq 'length')
 
-      if [[ "$failed" -eq 0 ]]; then
-        configurator_generic_dialog "RetroDECK Configurator - Repair Complete" "<span foreground='$purple'><b>All mounts repaired successfully!</b></span>\n\nRepaired: $repaired/$total mounts\n\nYour remote ROMs are ready to use."
-      else
-        configurator_generic_dialog "RetroDECK Configurator - Repair Complete" "<span foreground='$purple'><b>Mount repair completed with issues.</b></span>\n\nRepaired: $repaired/$total mounts\nFailed: $failed mounts\n\nCheck the logs for details."
+  if [[ "$discovered_count" -eq 0 ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>No systems found on WebDAV server.</b></span>\n\nMake sure your server has folders like /gba, /snes, /ps2 etc."
+    configurator_remote_dialog
+    return
+  fi
+
+  # Step 2: Build checklist of discovered systems
+  local checklist=()
+  local existing_systems=$(jq -r '.remote_roms.systems // {}' "$rd_conf")
+
+  while IFS= read -r system; do
+    [[ -z "$system" ]] && continue
+    local remote_path=$(echo "$discovered" | jq -r --arg s "$system" '.[$s]')
+    local is_configured=$(echo "$existing_systems" | jq -r --arg s "$system" 'has($s)')
+    local status="New"
+    [[ "$is_configured" == "true" ]] && status="Configured"
+    checklist+=("FALSE" "$system" "$remote_path" "$status")
+  done < <(echo "$discovered" | jq -r 'keys[]')
+
+  # Step 3: Show selection dialog
+  local selected_systems=$(rd_zenity --list \
+    --title "RetroDECK Configurator - Sync Systems" \
+    --text="Found <b>$discovered_count</b> system(s) on your WebDAV server.\n\nSelect systems to enable for remote ROM access:" \
+    --checklist \
+    --separator="^" \
+    --hide-column=2 --print-column=2 \
+    --ok-label="Enable Selected" --extra-button="Enable All" --cancel-label="Back" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --width=900 --height=600 \
+    --column "Enable" \
+    --column "System" \
+    --column "Remote Path" \
+    --column "Status" \
+    "${checklist[@]}")
+
+  local rc=$?
+
+  # Handle cancel
+  if [[ $rc -ne 0 ]]; then
+    configurator_remote_dialog
+    return
+  fi
+
+  # Parse selected systems
+  local systems_to_enable=()
+  if [[ "$selected_systems" == "Enable All" ]]; then
+    # Enable all discovered systems
+    while IFS= read -r system; do
+      [[ -z "$system" ]] && continue
+      systems_to_enable+=("$system")
+    done < <(echo "$discovered" | jq -r 'keys[]')
+  else
+    # Parse selected from checklist
+    IFS='^' read -ra systems_to_enable <<< "$selected_systems"
+  fi
+
+  local enable_count=${#systems_to_enable[@]}
+
+  if [[ "$enable_count" -eq 0 ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "No systems selected. Returning to menu."
+    configurator_remote_dialog
+    return
+  fi
+
+  # Step 4: Add selected systems to configuration and create ES-DE integration
+  log i "Enabling $enable_count systems for remote ROMs"
+  for system in "${systems_to_enable[@]}"; do
+    local remote_path=$(echo "$discovered" | jq -r --arg s "$system" '.[$s]')
+    remote_roms_add_system "$system" "$remote_path"
+    remote_roms_set_system_auto_refresh "$system" "true"
+    remote_roms_create_esde_integration "$system"
+  done
+
+  # Step 5: Refresh ROM listings for all configured systems
+  (
+    echo "10"
+    echo "# Refreshing ROM listings for $enable_count system(s)..."
+
+    local refreshed=0
+    for system in "${systems_to_enable[@]}"; do
+      echo "# Refreshing $system..."
+      if remote_roms_refresh_system_listing "$system" 2>/dev/null; then
+        ((refreshed++))
       fi
-      ;;
-  esac
+      local progress=$(( 10 + (refreshed * 90 / enable_count) ))
+      echo "$progress"
+    done
 
+    echo "100"
+    echo "# Complete"
+    echo "$refreshed" > /tmp/remote_roms_sync_result
+  ) | rd_zenity --progress --no-cancel --auto-close \
+    --title "RetroDECK - Syncing Systems" \
+    --text="Downloading ROM listings..." \
+    --width=400 --height=100
+
+  local refreshed=$(cat /tmp/remote_roms_sync_result 2>/dev/null || echo "0")
+  rm -f /tmp/remote_roms_sync_result
+
+  configurator_generic_dialog "RetroDECK Configurator - Sync Complete" "<span foreground='$purple'><b>Sync complete!</b></span>\n\nEnabled: $enable_count system(s)\nRefreshed: $refreshed/$enable_count system(s)\n\nYou can now browse remote ROMs in ES-DE."
   configurator_remote_dialog
+}
+
+configurator_remote_roms_manage_systems_list_dialog() {
+  # Dialog to list and select configured systems for management
+  # USAGE: configurator_remote_roms_manage_systems_list_dialog
+
+  log i "Opening Manage Systems list dialog"
+
+  # Get configured systems
+  local systems=$(jq -r '.remote_roms.systems // {}' "$rd_conf")
+  local system_count=$(echo "$systems" | jq 'length')
+
+  if [[ "$system_count" -eq 0 ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - Manage Systems" "<span foreground='$purple'><b>No systems configured.</b></span>\n\nUse 'Sync Systems' to discover and add systems first."
+    configurator_remote_dialog
+    return
+  fi
+
+  # Build menu of configured systems
+  local menu_items=()
+  while IFS= read -r system; do
+    [[ -z "$system" ]] && continue
+    local remote_path=$(echo "$systems" | jq -r --arg s "$system" '.[$s].remote_path // "unknown"')
+    local enabled=$(echo "$systems" | jq -r --arg s "$system" '.[$s].enabled // false')
+    local status="Disabled"
+    [[ "$enabled" == "true" ]] && status="Enabled"
+    menu_items+=("$system" "$remote_path" "$status")
+  done < <(echo "$systems" | jq -r 'keys[]')
+
+  # Show selection dialog
+  local selected_system=$(rd_zenity --list \
+    --title "RetroDECK Configurator - Manage Systems" \
+    --text="Select a system to configure:" \
+    --cancel-label="Back" --ok-label="Manage" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --width=900 --height=600 \
+    --column "System" \
+    --column "Remote Path" \
+    --column "Status" \
+    "${menu_items[@]}")
+
+  if [[ -n "$selected_system" ]]; then
+    configurator_remote_roms_manage_system_dialog "$selected_system"
+  else
+    configurator_remote_dialog
+  fi
+}
+
+# Legacy alias for compatibility
+configurator_remote_roms_repair_dialog() {
+  configurator_remote_roms_refresh_dialog
 }

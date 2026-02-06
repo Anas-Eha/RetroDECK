@@ -78,108 +78,57 @@ run_game() {
         exit 1
     fi
 
-    # Handle 999RepairRemote.zip: Repair all mounts when triggered
-    if [[ "$(basename "$game")" == "999RepairRemote.zip" ]]; then
-        log i "REMOTE_ROMS: Repair file detected: $game"
+    # Handle Remote ROMs: Check if this is a virtual browser trigger file
+    # Virtual browser creates placeholder files that trigger the browser when launched
+    if [[ "$game" == *.remote_trigger ]]; then
+        log i "REMOTE_ROMS: Virtual browser trigger detected: $game"
         
-        # Repair all remote mounts
-        log i "REMOTE_ROMS: Repairing all remote mounts..."
-        local repaired_count=$(remote_roms_repair_all_mounts)
-        q
-        # Show success dialog
-        if [[ "$repaired_count" -gt 0 ]]; then
-            rd_zenity --icon-name=net.retrodeck.retrodeck --info --no-wrap \
-                --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
-                --title "RetroDECK - Quick Resume Repair" \
-                --text="<span foreground='$purple'><b>Quick Resume Repair Complete!</b></span>\n\nRepaired <b>$repaired_count</b> remote mount(s).\n\nYou can now launch your games normally."
+        # Extract system from path
+        local system_name
+        system_name=$(echo "$game" | grep -oP '(?<=roms/)[^/]+')
+        
+        log i "REMOTE_ROMS: Opening virtual browser for system: $system_name"
+        
+        # Open virtual browser and get selected ROM
+        local selected_rom_path
+        selected_rom_path=$(remote_roms_virtual_browser_menu "$system_name")
+        
+        if [[ -n "$selected_rom_path" && -f "$selected_rom_path" ]]; then
+            log i "REMOTE_ROMS: User selected ROM: $selected_rom_path"
+            game="$selected_rom_path"
         else
-            rd_zenity --icon-name=net.retrodeck.retrodeck --info --no-wrap \
-                --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
-                --title "RetroDECK - Quick Resume Repair" \
-                --text="<span foreground='$purple'><b>All Mounts Healthy!</b></span>\n\nAll remote mounts are already working correctly.\n\nYou can now launch your games normally."
+            log i "REMOTE_ROMS: No ROM selected or download cancelled"
+            exit 0
         fi
-        
-        # Exit after repair - don't try to "launch" the QuickResume file
-        exit 0
     fi
 
-    # Handle Remote ROMs: Download from WebDAV if accessing from remote/ folder
+    # Handle Remote ROMs Legacy: Download from WebDAV if accessing from remote/ folder
+    # This handles any legacy paths or direct remote folder access
     if [[ "$game" == */remote/* ]]; then
         log d "REMOTE_ROMS: Remote ROM path detected: $game"
         log d "REMOTE_ROMS: roms_path variable is: $roms_path"
 
-        local remote_rom_path="$game"
         local system_name
         system_name=$(echo "$game" | grep -oP '(?<=roms/)[^/]+')
         local rom_name
         rom_name=$(basename "$game")
         local local_rom_path="$roms_path/$system_name/$rom_name"
-        local temp_download_path="$roms_path/$system_name/.${rom_name}.part"
 
         log d "REMOTE_ROMS: Parsed system_name: $system_name"
         log d "REMOTE_ROMS: Parsed rom_name: $rom_name"
         log d "REMOTE_ROMS: local_rom_path: $local_rom_path"
-        log d "REMOTE_ROMS: temp_download_path: $temp_download_path"
-        log d "REMOTE_ROMS: Checking if file exists at local path: $local_rom_path"
 
         # Check if already downloaded locally
         if [[ ! -f "$local_rom_path" ]]; then
             log i "Remote ROM detected: $rom_name - downloading to local storage..."
-            log d "REMOTE_ROMS: Local file not found, starting download process"
-
-            # Clean up any partial download
-            rm -f "$temp_download_path"
-
-            log d "REMOTE_ROMS: Starting download from: $remote_rom_path"
-            log d "REMOTE_ROMS: Target temp path: $temp_download_path"
-            log d "REMOTE_ROMS: Checking if remote file exists: $(ls -la "$remote_rom_path" 2>&1 || echo 'File not accessible')"
-
-            # Show download progress dialog and download atomically
-            (
-                echo "0"
-                echo "# Downloading $rom_name from remote storage..."
-
-                # Copy to temp file first (atomic download)
-                log d "REMOTE_ROMS: Executing cp command: cp \"$remote_rom_path\" \"$temp_download_path\""
-                if cp "$remote_rom_path" "$temp_download_path"; then
-                    log d "REMOTE_ROMS: cp command succeeded"
-                    # Verify file was downloaded completely
-                    if [[ -s "$temp_download_path" ]]; then
-                        log d "REMOTE_ROMS: Temp file exists and is non-empty: $(ls -la "$temp_download_path" 2>&1)"
-                        # Atomic move to final location
-                        if mv "$temp_download_path" "$local_rom_path"; then
-                            log d "REMOTE_ROMS: mv command succeeded, file at: $local_rom_path"
-                            echo "100"
-                            echo "# Download complete!"
-                        else
-                            log e "REMOTE_ROMS: mv command failed"
-                            echo "100"
-                            echo "# Failed to finalize download!"
-                            rm -f "$temp_download_path"
-                            exit 1
-                        fi
-                    else
-                        log e "REMOTE_ROMS: Downloaded file is empty or missing"
-                        echo "100"
-                        echo "# Downloaded file is empty!"
-                        rm -f "$temp_download_path"
-                        exit 1
-                    fi
-                else
-                    log e "REMOTE_ROMS: cp command failed - exit code: $?"
-                    echo "100"
-                    echo "# Download failed!"
-                    rm -f "$temp_download_path"
-                    exit 1
-                fi
-            ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
-                --title "RetroDECK - Downloading ROM" \
-                --text="Downloading $rom_name from remote storage..." \
-                --width=400 --height=100
-
-            if [[ -f "$local_rom_path" ]]; then
-                log i "Successfully downloaded $rom_name to $local_rom_path"
-                game="$local_rom_path"
+            
+            # Use rclone-based download (no mount required)
+            local downloaded_path
+            downloaded_path=$(remote_roms_download_rom "$system_name" "$rom_name")
+            
+            if [[ -n "$downloaded_path" && -f "$downloaded_path" ]]; then
+                log i "Successfully downloaded $rom_name to $downloaded_path"
+                game="$downloaded_path"
             else
                 log e "Failed to download $rom_name"
                 rd_zenity --icon-name=net.retrodeck.retrodeck --error --no-wrap \

@@ -29,10 +29,6 @@ add-extensions:
     autodelete: false
     add-ld-path: lib
 
-  # FUSE support for rclone mount (WebDAV remote ROMs)
-  # Uses bundled libfuse with fusermount3 wrapper for host unmount operations
-  # Mounts are created in sandbox and shared via --filesystem=host
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
 #                             finish-args
@@ -50,18 +46,11 @@ finish-args:
   # D-Bus: Manage user session (systemd-logind)
   - --talk-name=org.freedesktop.login1.Manager
 
-  # D-Bus: Required for fusermount3 wrapper to call host fusermount3 via flatpak-spawn
-  # This is REQUIRED for remote ROMs WebDAV unmounting functionality
-  - --talk-name=org.freedesktop.Flatpak
-
   # D-Bus: Share IPC namespace for inter-process communication
   - --share=ipc
 
-  # Devices: All device access (e.g., /dev/*, used for various inputs and FUSE /dev/fuse)
+  # Devices: All device access (e.g., /dev/*, used for various inputs)
   - --device=all
-
-  # FUSE: Shared memory device access (required for rclone mount inter-process communication)
-  - --device=shm
 
   # Devices: Bluetooth access (used for various inputs)
   - --allow=bluetooth
@@ -85,8 +74,6 @@ finish-args:
   # GStreamer integration
   - --env=GST_PLUGIN_SYSTEM_PATH=/app/lib32/gstreamer-1.0:/app/lib/gstreamer-1.0:/usr/lib/i386-linux-gnu/gstreamer-1.0:/usr/lib/x86_64-linux-gnu/gstreamer-1.0
 
-  # rclone: PATH includes /app/bin for fusermount3 wrapper
-
   # Gamescope integration
   - --filesystem=xdg-run/gamescope-0:ro
   - --env=LD_LIBRARY_PATH=/usr/lib/extensions/vulkan/gamescope/lib
@@ -94,9 +81,9 @@ finish-args:
   # Multi‑arch support (32‑bit libs on 64‑bit)
   - --allow=multiarch
 
-  # Network
+  # Network 
   - --share=network
-
+  
   # Environmental Paths: MangoHud, JRE (Java based Systems), Gamescope and OBS (Disabled for now) 
   # - --env=PATH=/usr/lib/extensions/vulkan/MangoHud/bin/:/app/jre/bin/:/usr/lib/extensions/vulkan/gamescope/bin:/usr/lib/extensions/vulkan/OBSVkCapture/bin
 
@@ -191,26 +178,7 @@ modules:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   # -------------------------------------------------------------------------
-  # libfuse - FUSE library for mounting filesystems in userspace
-  # Required for rclone mount to work properly
-  # -------------------------------------------------------------------------
-
-  - name: libfuse
-    buildsystem: meson
-    config-opts:
-      - -Dexamples=false
-      - -Dinitscriptdir=
-      - -Duseroot=false
-      - -Dtests=false
-      - -Dudevrulesdir=/tmp/
-    sources:
-      - type: archive
-        url: https://github.com/libfuse/libfuse/releases/download/fuse-3.16.2/fuse-3.16.2.tar.gz
-        sha256: f797055d9296b275e981f5f62d4e32e089614fc253d1ef2985851025b8a0ce87
-
-  # -------------------------------------------------------------------------
-  # rclone - manage files on cloud storage (required for WebDAV remote ROMs)
-  # Uses flatpak-spawn --host for FUSE mount operations
+  # rclone - manage files on cloud storage.
   # -------------------------------------------------------------------------
 
   - name: rclone
@@ -221,20 +189,6 @@ modules:
       - type: archive
         url: https://github.com/rclone/rclone/releases/download/v1.69.1/rclone-v1.69.1-linux-amd64.zip
         sha256: 231841f8d8029ae6cfca932b601b3b50d0e2c3c2cb9da3166293f1c3eae7d79c
-
-  # -------------------------------------------------------------------------
-  # host-command-wrapper - fusermount3 wrapper for FUSE unmount operations
-  # Uses flatpak-spawn --host to call host system's fusermount3
-  # Source: https://gitlab.gnome.org/GNOME/gnome-builder/-/blob/main/build-aux/flatpak/fusermount-wrapper.sh
-  # -------------------------------------------------------------------------
-
-  - name: host-command-wrapper
-    buildsystem: simple
-    build-commands:
-      - install -Dm755 fusermount-wrapper.sh "${FLATPAK_DEST}/bin/fusermount3"
-    sources:
-      - type: file
-        path: fusermount-wrapper.sh
 
   # -------------------------------------------------------------------------
   # rsync - utility for transferring and synchronizing files.

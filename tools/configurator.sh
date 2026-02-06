@@ -63,6 +63,10 @@ source /app/libexec/global.sh
 #       - M3U Multi-File Validator
 #       - Repair RetroDECK paths
 #       - Change Logging Level
+#      - Remote Connection
+#       - Connection Settings
+#       - Refresh All Rom Lists
+#       - Test Connection
 #     - Steam Tools
 #       - Add RetroDECK to Steam
 #       - Automatic Steam Sync
