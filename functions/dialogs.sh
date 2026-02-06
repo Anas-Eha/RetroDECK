@@ -1325,8 +1325,8 @@ configurator_remote_roms_connection_dialog() {
     --title "RetroDECK Configurator - Remote Connection" \
     --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
     --text="Configure your remote server connection settings.\n\n<span foreground='$purple'><b>The source folder should contain subfolders like /gba, /snes, /ps2 etc.</b></span>" \
-    --add-entry="Server URL (e.g., https://myserver.com/webdav ):$current_url" \
-    --add-entry="Username:$current_user" \
+    --add-entry="Server URL (e.g., https://myserver.com/webdav): $current_url" \
+    --add-entry="Username: $current_user" \
     --add-password="Password:")
 
   local rc=$?
@@ -1348,34 +1348,18 @@ configurator_remote_roms_connection_dialog() {
     return
   fi
 
-  remote_roms_save_connection_config "$url" "$user" "$pass"
+  # Save connection config with error handling
+  if ! remote_roms_save_connection_config "$url" "$user" "$pass"; then
+    configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>Failed to save connection settings.</b></span>\n\nPlease check the logs for details."
+    configurator_remote_dialog
+    return
+  fi
 
   configurator_generic_dialog "RetroDECK Configurator - Settings Saved" "<span foreground='$purple'><b>Remote connection settings saved.</b></span>\n\nYou can now test the connection or configure mounts."
   configurator_remote_dialog
 }
 
-configurator_remote_roms_systems_dialog() {
-  # DEPRECATED: This function is kept for compatibility but redirects to refresh
-  # The new workflow combines discovery + refresh in one action
-  # USAGE: configurator_remote_roms_systems_dialog
 
-  log i "Opening Remote ROMs systems dialog (redirecting to refresh)"
-  configurator_remote_roms_refresh_dialog
-}
-
-# Legacy alias for compatibility
-configurator_remote_roms_mounts_dialog() {
-  configurator_remote_roms_systems_dialog
-}
-
-configurator_remote_roms_discover_dialog() {
-  # DEPRECATED: Discovery is now part of the refresh workflow
-  # This function redirects to the new combined refresh dialog
-  # USAGE: configurator_remote_roms_discover_dialog
-
-  log i "Opening remote ROMs discovery dialog (redirecting to refresh)"
-  configurator_remote_roms_refresh_dialog
-}
 
 configurator_remote_roms_test_dialog() {
   # Dialog to test remote server connection
@@ -1589,10 +1573,51 @@ configurator_remote_roms_refresh_dialog() {
 
   local discovered_count=$(echo "$discovered" | jq 'length')
 
+  # If quick scan found no systems, offer manual path entry
   if [[ "$discovered_count" -eq 0 ]]; then
-    configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>No systems found on Remote server.</b></span>\n\nMake sure your server has folders like /gba, /snes, /ps2 etc."
-    configurator_remote_dialog
-    return
+    local manual_choice=$(rd_zenity --question \
+      --title "RetroDECK Configurator - Sync Systems" \
+      --text="<span foreground='$purple'><b>No systems found on Remote server.</b></span>\n\nThe quick scan looks for system folders in common locations like /roms, /games, /library.\n\nWould you like to manually enter the path to your ROMs folder?" \
+      --ok-label="Enter Path" --cancel-label="Cancel" \
+      --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+      --width=500 --height=250)
+
+    if [[ $? -eq 0 ]]; then
+      # User chose to enter path manually
+      local manual_path=$(rd_zenity --entry \
+        --title "RetroDECK Configurator - Manual Path" \
+        --text="Enter the path to your ROMs folder on the remote server:\n\nExamples:\n• roms (for /roms)\n• data/games (for /data/games)\n• storage/retro/roms" \
+        --entry-text="roms")
+
+      if [[ -n "$manual_path" ]]; then
+        # Validate and clean the path
+        manual_path=$(echo "$manual_path" | sed 's|^/||' | sed 's|/$||')
+
+        # Test if path exists and scan it
+        (
+          echo "10"
+          echo "# Scanning $manual_path..."
+          discovered=$(remote_roms_discover_systems "$manual_path")
+          echo "$discovered" > /tmp/remote_roms_discovered
+          echo "100"
+          echo "# Scan complete"
+        ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
+          --title "RetroDECK - Scanning Path" \
+          --text="Scanning $manual_path for ROM systems..." \
+          --width=400 --height=100
+
+        discovered=$(cat /tmp/remote_roms_discovered 2>/dev/null || echo "{}")
+        rm -f /tmp/remote_roms_discovered
+        discovered_count=$(echo "$discovered" | jq 'length')
+      fi
+    fi
+
+    # If still no systems, show error and return
+    if [[ "$discovered_count" -eq 0 ]]; then
+      configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>No systems found.</b></span>\n\nMake sure your server has folders named after RetroDECK systems (e.g., gba, snes, ps2).\n\nYou can also add systems manually from the Manage Systems menu."
+      configurator_remote_dialog
+      return
+    fi
   fi
 
   # Step 2: Build checklist of discovered systems
@@ -1738,7 +1763,4 @@ configurator_remote_roms_manage_systems_list_dialog() {
   fi
 }
 
-# Legacy alias for compatibility
-configurator_remote_roms_repair_dialog() {
-  configurator_remote_roms_refresh_dialog
-}
+

@@ -311,7 +311,7 @@ remote_roms_get_remote_creds() {
 remote_roms_save_connection_config() {
   # Save remote connection settings (protocol-agnostic)
   # URL is saved to JSON, credentials are saved to rclone.conf only
-  # Currently supports: webdav
+  # Currently supports: webdav (protocol value in config)
   # USAGE: remote_roms_save_connection_config "$url" "$user" "$pass"
   # Returns: 0 on success, 1 on failure
 
@@ -328,7 +328,18 @@ remote_roms_save_connection_config() {
     log e "Username cannot be empty"
     return 1
   fi
+
+  if [[ -z "$pass" ]]; then
+    log e "Password cannot be empty"
+    return 1
+  fi
   
+  # Initialize config if needed before saving
+  remote_roms_init_config || {
+    log e "Failed to initialize remote ROMs config"
+    return 1
+  }
+
   # Save URL to JSON config only (no credentials)
   remote_roms_set_setting "remote_url" "$url" || return 1
   remote_roms_set_setting "remote_protocol" "webdav" || return 1
@@ -379,14 +390,14 @@ remote_roms_test_connection() {
   }
   _REMOTE_ROMS_TEMP_RCLONE_CONFIG="$rclone_config"
 
-  if ! _remote_roms_write_rclone_config "$rclone_config" "webdav-test" "$url" "$user" "$pass"; then
+  if ! _remote_roms_write_rclone_config "$rclone_config" "remote-test" "$url" "$user" "$pass"; then
     echo "connection_failed"
     return 1
   fi
 
   # Test connection with timeout
   local rclone_output
-  rclone_output=$(RCLONE_CONFIG="$rclone_config" rclone ls "webdav-test:/" --max-depth 1 \
+  rclone_output=$(RCLONE_CONFIG="$rclone_config" rclone ls "remote-test:/" --max-depth 1 \
     --contimeout ${REMOTE_ROMS_RCLONE_CONNECT_TIMEOUT}s --timeout ${REMOTE_ROMS_RCLONE_TIMEOUT}s 2>&1)
   local rclone_exit_code=$?
 
@@ -542,8 +553,12 @@ remote_roms_get_available_systems() {
 
 remote_roms_discover_systems() {
   # Auto-discover systems on remote server
-  # USAGE: discovered=$(remote_roms_discover_systems)
+  # Scans default paths if no argument provided, or specific path if provided
+  # USAGE: discovered=$(remote_roms_discover_systems)           # Quick scan
+  # USAGE: discovered=$(remote_roms_discover_systems "$path") # Scan specific path
   # Returns: 0 on success (JSON object), 1 on failure (empty JSON)
+
+  local custom_path="${1:-}"
 
   # Decode base64-encoded credentials to safely handle special characters
   eval $(remote_roms_get_remote_creds)
@@ -558,13 +573,10 @@ remote_roms_discover_systems() {
 
   # Create temporary rclone config
   local rclone_config
-  rclone_config=$(mktemp) || {
-    echo "{}"
-    return 1
-  }
+  rclone_config=$(mktemp) || { echo "{}"; return 1; }
   _REMOTE_ROMS_TEMP_RCLONE_CONFIG="$rclone_config"
 
-  if ! _remote_roms_write_rclone_config "$rclone_config" "webdav-discover" "$url" "$user" "$pass"; then
+  if ! _remote_roms_write_rclone_config "$rclone_config" "remote-discover" "$url" "$user" "$pass"; then
     echo "{}"
     return 1
   fi
@@ -572,9 +584,24 @@ remote_roms_discover_systems() {
   local available_systems=$(remote_roms_get_available_systems)
   local discovered="{}"
 
-  # Scan root and common subfolders for system folders
-  for scan_path in "/" "/roms" "/games" "/library"; do
-    local folders=$(RCLONE_CONFIG="$rclone_config" rclone lsf "webdav-discover:$scan_path" --max-depth 1 --dirs-only 2>/dev/null | sed 's|/$||')
+  # Determine which paths to scan
+  local scan_paths=()
+  if [[ -n "$custom_path" ]]; then
+    # Single user-provided path
+    scan_paths=("$custom_path")
+    remote_roms_log_debug "discovery: scanning custom path '$custom_path'"
+  else
+    # Default quick scan paths
+    scan_paths=("/" "/roms" "/games" "/library")
+  fi
+
+  # Scan selected paths
+  for scan_path in "${scan_paths[@]}"; do
+    local rclone_path="$scan_path"
+    [[ "$scan_path" != "/" ]] && rclone_path="${scan_path#/}" # Remove leading slash except for root
+
+    local folders=$(RCLONE_CONFIG="$rclone_config" rclone lsf "remote-discover:/$rclone_path" \
+      --max-depth 1 --dirs-only 2>/dev/null | sed 's|/$||')
 
     while IFS= read -r folder; do
       [[ -z "$folder" ]] && continue
@@ -584,8 +611,9 @@ remote_roms_discover_systems() {
         continue
       fi
 
-      local full_path="${scan_path:1}$folder"
-      [[ "$scan_path" == "/" ]] && full_path="$folder"
+      # Build full path
+      local full_path="$folder"
+      [[ "$scan_path" != "/" ]] && full_path="${scan_path#/}/$folder"
 
       # Check if folder name matches a known system
       for sys in $available_systems; do
@@ -593,12 +621,20 @@ remote_roms_discover_systems() {
           # Only add if not already found (prefer shorter paths)
           if ! echo "$discovered" | jq -e --arg s "$sys" 'has($s)' > /dev/null 2>&1; then
             discovered=$(echo "$discovered" | jq --arg s "$sys" --arg p "$full_path" '.[$s] = $p')
+            remote_roms_log_debug "discovery: found $sys at $full_path"
           fi
           break
         fi
       done
     done <<< "$folders"
   done
+
+  local final_count=$(echo "$discovered" | jq 'length')
+  if [[ -n "$custom_path" ]]; then
+    remote_roms_log_debug "discovery: custom scan complete, found $final_count systems at '$custom_path'"
+  else
+    remote_roms_log_debug "discovery: quick scan complete, found $final_count systems"
+  fi
 
   echo "$discovered"
   return 0
