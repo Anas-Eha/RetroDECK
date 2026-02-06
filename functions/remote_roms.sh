@@ -8,7 +8,9 @@
 # Configuration & Constants
 # ============================================
 
-readonly REMOTE_ROMS_CACHE_DIR="${rd_cache}/remote_roms"
+# Define cache directory (XDG_CACHE_HOME falls back to ~/.cache)
+readonly RD_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/retrodeck"
+readonly REMOTE_ROMS_CACHE_DIR="${RD_CACHE_DIR}/remote_roms"
 readonly REMOTE_ROMS_LISTING_FILE="listing.json"
 readonly REMOTE_ROMS_GAMELIST_FILE="gamelist.xml"
 readonly REMOTE_ROMS_RCLONE_CONFIG_DIR="${XDG_CONFIG_HOME}/retrodeck/rclone"
@@ -167,11 +169,19 @@ _remote_roms_write_rclone_config() {
     echo "pass = $obscured_pass"
   } > "$config_file"
 
+  # Verify file was created
+  if [[ ! -f "$config_file" ]]; then
+    log e "Failed to create rclone config file at $config_file"
+    return 1
+  fi
+
   # Then set restricted permissions
   chmod 600 "$config_file" || {
     log e "Failed to set permissions on rclone config"
     return 1
   }
+
+  return 0
 }
 
 
