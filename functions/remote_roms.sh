@@ -190,19 +190,12 @@ _remote_roms_write_rclone_config() {
   local user="$4"
   local pass="$5"
 
-  # Create config file with restricted permissions BEFORE writing sensitive data
-  touch "$config_file"
-  chmod 600 "$config_file" || {
-    log e "Failed to set permissions on rclone config"
-    return 1
-  }
-
   # Obscure password for rclone (rclone uses reversible obfuscation, NOT encryption)
   # This is not security - it only prevents casual shoulder-surfing of the config file
   local obscured_pass
   obscured_pass=$(rclone obscure "$pass" 2>/dev/null) || obscured_pass="$pass"
 
-  # Write config to restricted file
+  # Write config file first
   {
     echo "[$section]"
     echo "type = webdav"
@@ -212,9 +205,9 @@ _remote_roms_write_rclone_config() {
     echo "pass = $obscured_pass"
   } > "$config_file"
 
-  # Verify and re-enforce permissions
+  # Then set restricted permissions
   chmod 600 "$config_file" || {
-    log e "Failed to enforce permissions on rclone config"
+    log e "Failed to set permissions on rclone config"
     return 1
   }
 }
@@ -233,8 +226,6 @@ remote_roms_init_config() {
     log i "Creating remote_roms configuration"
     local default_config='{
       "webdav_url": "",
-      "webdav_user": "",
-      "webdav_pass": "",
       "systems": {},
       "global_enabled": false
     }'
@@ -327,25 +318,37 @@ remote_roms_set_setting() {
 }
 
 remote_roms_get_webdav_creds() {
-  # Get WebDAV credentials
+  # Get WebDAV credentials from rclone.conf
   # USAGE: eval $(remote_roms_get_webdav_creds)  # sets $url, $user, $pass
   # OR: local url=$(remote_roms_get_webdav_creds url)
+  # NOTE: Uses base64 encoding to safely handle special characters in credentials
 
   local field="${1:-all}"
-  local url=$(remote_roms_get_setting "webdav_url")
-  local user=$(remote_roms_get_setting "webdav_user")
-  local pass=$(remote_roms_get_setting "webdav_pass")
+  local url=""
+  local user=""
+  local pass=""
+  local rclone_conf="${XDG_CONFIG_HOME:-$HOME/.config}/rclone/rclone.conf"
+
+  # Get URL from JSON config
+  url=$(remote_roms_get_setting "webdav_url")
+
+  # Get credentials from rclone.conf if it exists
+  if [[ -f "$rclone_conf" ]]; then
+    user=$(awk -F' = ' '/^\[retrodeck-webdav\]/{found=1} found && /^user = /{print $2; found=0}' "$rclone_conf")
+    pass=$(awk -F' = ' '/^\[retrodeck-webdav\]/{found=1} found && /^pass = /{print $2; found=0}' "$rclone_conf")
+  fi
 
   case "$field" in
     url)  echo "$url" ;;
     user) echo "$user" ;;
     pass) echo "$pass" ;;
-    *)    echo "url='$url'; user='$user'; pass='$pass'" ;;
+    *)    echo "url=$(echo -n "$url" | base64 -w 0); user=$(echo -n "$user" | base64 -w 0); pass=$(echo -n "$pass" | base64 -w 0)" ;;
   esac
 }
 
 remote_roms_save_webdav_config() {
   # Save WebDAV connection settings
+  # URL is saved to JSON, credentials are saved to rclone.conf only
   # USAGE: remote_roms_save_webdav_config "$url" "$user" "$pass"
   # Returns: 0 on success, 1 on failure
 
@@ -363,10 +366,20 @@ remote_roms_save_webdav_config() {
     return 1
   fi
   
-  # Save settings
+  # Save URL to JSON config only (no credentials)
   remote_roms_set_setting "webdav_url" "$url" || return 1
-  remote_roms_set_setting "webdav_user" "$user" || return 1
-  remote_roms_set_setting "webdav_pass" "$pass" || return 1
+  
+  # Save credentials to rclone.conf
+  local rclone_dir="${XDG_CONFIG_HOME:-$HOME/.config}/rclone"
+  mkdir -p "$rclone_dir" || {
+    log e "Failed to create rclone directory"
+    return 1
+  }
+  
+  if ! _remote_roms_write_rclone_config "$rclone_dir/rclone.conf" "retrodeck-webdav" "$url" "$user" "$pass"; then
+    log e "Failed to write rclone config"
+    return 1
+  fi
   
   log i "WebDAV configuration saved"
   return 0
@@ -377,7 +390,11 @@ remote_roms_test_connection() {
   # USAGE: result=$(remote_roms_test_connection)
   # Returns: "connected", "missing_config", "rclone_not_found", or "connection_failed"
 
+  # Decode base64-encoded credentials to safely handle special characters
   eval $(remote_roms_get_webdav_creds)
+  url=$(echo "$url" | base64 -d)
+  user=$(echo "$user" | base64 -d)
+  pass=$(echo "$pass" | base64 -d)
 
   # Check for missing configuration
   if [[ -z "$url" || -z "$user" ]]; then
@@ -414,6 +431,10 @@ remote_roms_test_connection() {
     echo "connected"
     return 0
   else
+    # Log the actual error for debugging
+    log e "WebDAV connection test failed: $rclone_output"
+    remote_roms_log_debug "rclone exit code: $rclone_exit_code"
+    remote_roms_log_debug "rclone output: $rclone_output"
     echo "connection_failed"
     return 1
   fi
@@ -561,7 +582,11 @@ remote_roms_discover_systems() {
   # USAGE: discovered=$(remote_roms_discover_systems)
   # Returns: 0 on success (JSON object), 1 on failure (empty JSON)
 
+  # Decode base64-encoded credentials to safely handle special characters
   eval $(remote_roms_get_webdav_creds)
+  url=$(echo "$url" | base64 -d)
+  user=$(echo "$user" | base64 -d)
+  pass=$(echo "$pass" | base64 -d)
 
   if [[ -z "$url" || -z "$user" ]]; then
     echo "{}"
@@ -624,7 +649,11 @@ remote_roms_generate_rclone_config() {
   # Generate rclone config file for operations
   # USAGE: remote_roms_generate_rclone_config
 
+  # Decode base64-encoded credentials to safely handle special characters
   eval $(remote_roms_get_webdav_creds)
+  url=$(echo "$url" | base64 -d)
+  user=$(echo "$user" | base64 -d)
+  pass=$(echo "$pass" | base64 -d)
 
   if [[ -z "$url" || -z "$user" ]]; then
     log e "Cannot generate rclone config: missing URL or username"
@@ -969,7 +998,7 @@ remote_roms_browse_system() {
   # Validate system name
   if ! _remote_roms_validate_system_name "$system"; then
     return 1
-  fi
+prprismaazure  fi
 
   remote_roms_log_debug "browse_system: opening browser for $system"
 
