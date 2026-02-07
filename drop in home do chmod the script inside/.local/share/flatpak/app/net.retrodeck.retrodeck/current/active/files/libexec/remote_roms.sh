@@ -215,7 +215,12 @@ remote_roms_disable_system() {
     if rm -f "${dir}/gamelist.xml.remote"; then
         log d "remote_roms_disable_system: removed remote gamelist"
     fi
-    
+
+    # Remove local gamelist (will be recreated fresh on next enable)
+    if rm -f "${dir}/gamelist.xml.local"; then
+        log d "remote_roms_disable_system: removed local gamelist"
+    fi
+
     log i "remote_roms_disable_system: system '${system}' disabled successfully"
 }
 

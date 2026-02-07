@@ -29,6 +29,19 @@ log d "Checking for local gamelist at '$gamelist_local' and game '$rom_name'"
 xmlstarlet sel -t -v "//game[path='./$rom_name']" "$gamelist_local" >/dev/null 2>&1 && \
     echo "{\"romPath\": \"$local_rom_path\"}" && exit 0
 
+# Check if the file exists locally (Use case being the user put a rom in the folder without remote connection)
+if [[ -f "$local_rom_path" ]]; then
+    log i "Game '$rom_name' found at '$local_rom_path' but not in local gamelist, adding it"
+    temp_list="${gamelist_local}.tmp.$$"
+    head -n -1 "$gamelist_local" > "$temp_list"
+    echo "  <game><path>./$rom_name</path><name>${game_name:-$rom_name}</name></game>" >> "$temp_list"
+    echo '</gameList>' >> "$temp_list"
+    xmlstarlet val "$temp_list" >/dev/null 2>&1 && mv "$temp_list" "$gamelist_local"
+    rm -f "$temp_list"
+    echo "{\"romPath\": \"$local_rom_path\"}"
+    exit 0
+fi
+
 # Need to download
 log i "Game '$rom_name' not found locally for system '$system_name', attempting remote download"
 mkdir -p "$roms_path/$system_name"

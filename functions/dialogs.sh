@@ -1555,9 +1555,9 @@ configurator_remote_roms_manage_systems_list_dialog() {
   while IFS= read -r system; do
     [[ -z "$system" ]] && continue
     local remote_path=$(echo "$systems" | jq -r --arg s "$system" '.[$s].remote_path // "unknown"')
-    local enabled=$(echo "$systems" | jq -r --arg s "$system" '.[$s].enabled // false')
-    local status="Disabled"
-    [[ "$enabled" == "true" ]] && status="Enabled"
+    local auto_refresh=$(echo "$systems" | jq -r --arg s "$system" '.[$s].auto_refresh // false')
+    local status="Off"
+    [[ "$auto_refresh" == "true" ]] && status="On"
     menu_items+=("$system" "$remote_path" "$status")
   done < <(echo "$systems" | jq -r 'keys[]')
 
@@ -1591,10 +1591,8 @@ configurator_remote_roms_manage_system_dialog() {
     refresh=false  # Will be set to true to refresh the dialog
     log i "Opening manage dialog for $system"
 
-  # Check current status 
-  local existing_config=$(jq -r --arg s "$system" '.remote_roms.systems[$s] // empty' "$rd_conf")
-  local auto_refresh="false"
-  [[ "$is_configured" == "true" ]] && auto_refresh=$(echo "$existing_config" | jq -r '.auto_refresh // false')
+  # Check current status - system is already in config since it was selected from the list
+  local auto_refresh=$(jq -r --arg s "$system" '.remote_roms.systems[$s].auto_refresh // false' "$rd_conf")
 
 
   local auto_refresh_text="Off"
