@@ -22,6 +22,10 @@ source /app/libexec/global.sh
 #         - Universal Dynamic Input Textures: Dolphin
 #         - Universal Dynamic Input Textures: Primehack
 #         - PortMaster: Hide
+#      - Remote Connection
+#       - Connection Settings
+#       - Refresh All Rom Lists
+#       - Test Connection
 #     - Open Component (Behind one-time power user warning dialog)
 #       - Dynamically generated list of emulators from open_component --list and --getdesc (features.json)
 #     - Reset Component
@@ -103,6 +107,7 @@ configurator_welcome_dialog() {
     "About RetroDECK" "View patch notes, credits, and other project information."
     "Data Management" "Move, clean empty or rebuild RetroDECK directories."
     "Open Component" "Manually launch and configure individual components. Advanced Users Only." 
+    "Remote Connection" "Configure remote ROMs connection for download."
     "Reset Components" "Reset a specific component or restore all RetroDECK defaults."
     "Settings" "Adjust core RetroDECK: Presets, Visuals, Tweaks and Logins."
     "Steam Tools" "Synchronize ES-DE Favorites or add RetroDECK to Steam."
@@ -158,6 +163,11 @@ configurator_welcome_dialog() {
   "Data Management" )
     log i "Configurator: opening \"$choice\" menu"
     configurator_data_management_dialog
+  ;;
+
+  "Remote Connection" )
+    log i "Configurator: opening \"$choice\" menu"
+    configurator_remote_dialog
   ;;
 
   "" )
@@ -385,6 +395,60 @@ configurator_steam_tools_dialog() {
   else # User hit cancel
     configurator_welcome_dialog
   fi
+}
+
+configurator_remote_dialog() {
+  # Main dialog for Remote Connection settings
+  # USAGE: configurator_remote_dialog
+
+  log i "Opening Remote Connection dialog"
+
+  # Initialize config if needed
+  remote_roms_init_config
+
+  local remote_rom_enabled=$(remote_roms_get_setting "remote_rom_enabled")
+  local status_text="Disabled"
+  [[ "$remote_rom_enabled" == "true" ]] && status_text="Enabled"
+
+  local menu_options=(
+    "Sync Systems" "Auto-discover and enable systems from remote server"
+    "Manage Systems" "View and configure individual remote systems"
+    "Connection Settings" "Configure remote server URL, username and password"
+    "Test Connection" "Test the remote server connection"
+  )
+
+  choice=$(rd_zenity --list \
+    --title "RetroDECK Configurator - Remote Connection" \
+    --cancel-label="Back" --ok-label="Select" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --width=1000 --height=600 \
+    --column="Option" --column="Description" \
+    "${menu_options[@]}")
+
+  local rc=$?
+
+  if [[ $rc -ne 0 || -z "$choice" ]]; then
+    configurator_welcome_dialog
+    return
+  fi
+
+  case "$choice" in
+    "Connection Settings")
+      configurator_remote_roms_connection_dialog
+      ;;
+    "Sync Systems")
+      configurator_remote_roms_refresh_dialog
+      ;;
+    "Manage Systems")
+      configurator_remote_roms_manage_systems_list_dialog
+      ;;
+    "Test Connection")
+      configurator_remote_roms_test_dialog
+      ;;
+    *)
+      configurator_remote_dialog
+      ;;
+  esac
 }
 
 configurator_developer_dialog() {
