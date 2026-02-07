@@ -1264,8 +1264,8 @@ configurator_remote_roms_connection_dialog() {
 
   log i "Opening Remote ROMs connection dialog"
 
-  local current_url=$(remote_roms_get_setting "remote_url")
-  local current_user=$(remote_roms_get_remote_creds user)
+  local current_url=$(jq -r '.remote_roms.remote_url // ""' "$rd_conf" 2>/dev/null)
+  local current_user=$(grep "^user = " "$REMOTE_ROMS_RCLONE_CONF" 2>/dev/null | cut -d'=' -f2- | tr -d ' ')
 
   local form_result
   form_result=$(rd_zenity --forms \
@@ -1297,9 +1297,9 @@ configurator_remote_roms_connection_dialog() {
   fi
 
   # Save connection config with error handling
-  log d "Calling remote_roms_save_connection_config..."
-  if ! remote_roms_save_connection_config "$url" "$user" "$pass"; then
-    log e "remote_roms_save_connection_config failed"
+  log d "Calling remote_roms_save_config..."
+  if ! remote_roms_save_config "$url" "$user" "$pass"; then
+    log e "remote_roms_save_config failed"
     configurator_generic_dialog "RetroDECK Configurator - Error" "<span foreground='$purple'><b>Failed to save connection settings.</b></span>\n\nPlease check the logs for details."
     configurator_remote_dialog
     return 1
@@ -1337,9 +1337,7 @@ configurator_remote_roms_test_dialog() {
     "missing_config")
       configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Configuration incomplete.</b></span>\n\nPlease set the remote URL, username, and password first."
       ;;
-    "rclone_not_found")
-      configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>rclone not found.</b></span>\n\nrclone is required for remote connections. Please ensure it's installed."
-      ;;
+
     "connection_failed"|*)
       configurator_generic_dialog "RetroDECK Configurator - Connection Test" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check:\n• remote URL is correct\n• Username and password are correct\n• Server is accessible\n• Network connection is working"
       ;;
@@ -1362,9 +1360,7 @@ configurator_remote_roms_refresh_dialog() {
       "missing_config")
         configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>Configuration incomplete.</b></span>\n\nPlease configure remote connection settings first."
         ;;
-      "rclone_not_found")
-        configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>rclone not found.</b></span>\n\nrclone is required for remote connections."
-        ;;
+
       *)
         configurator_generic_dialog "RetroDECK Configurator - Sync Systems" "<span foreground='$purple'><b>Connection failed.</b></span>\n\nPlease check your remote settings and try again."
         ;;
@@ -1497,13 +1493,11 @@ configurator_remote_roms_refresh_dialog() {
     return
   fi
 
-  # Step 4: Add selected systems to configuration and create ES-DE integration
+  # Step 4: Enable selected systems (combines add + auto_refresh + ES-DE integration)
   log i "Enabling $enable_count systems for remote ROMs"
   for system in "${systems_to_enable[@]}"; do
     local remote_path=$(echo "$discovered" | jq -r --arg s "$system" '.[$s]')
-    remote_roms_add_system "$system" "$remote_path"
-    remote_roms_set_system_auto_refresh "$system" "true"
-    remote_roms_create_esde_integration "$system"
+    remote_roms_enable_system "$system" "$remote_path"
   done
 
   # Step 5: Refresh ROM listings for all configured systems
@@ -1515,7 +1509,7 @@ configurator_remote_roms_refresh_dialog() {
     for system in "${systems_to_enable[@]}"; do
       echo "# Refreshing $system..."
       log d "[SYNC] Starting refresh for system: $system"
-      if remote_roms_refresh_system_listing "$system"; then
+      if remote_roms_refresh_system "$system"; then
         ((refreshed++))
         log d "[SYNC] Successfully refreshed $system"
       else
@@ -1647,18 +1641,11 @@ configurator_remote_roms_manage_system_dialog() {
   # Handle the choice and refresh the dialog if needed
   case "$choice" in
     "Enable Remote ROMs")
-      # Add system with auto-refresh enabled by default
-      remote_roms_add_system "$system" "$system"
-      remote_roms_set_system_auto_refresh "$system" "true"
-
-      # Create ES-DE integration (remote folder + gamelist.xml sync)
-      remote_roms_create_esde_integration "$system"
-
-      # Pre-fetch listing and build gamelist.xml
-      if remote_roms_refresh_system_listing "$system"; then
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured and ready!</b></span>\n\nES-DE gamelist.xml updated with remote ROMs.\n\nLook for remote ROMs in your $system folder in ES-DE."
+      # Enable system (combines add + auto-refresh + ES-DE integration + refresh)
+      if remote_roms_enable_system "$system" "$system"; then
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured and ready!</b></span>\n\nES-DE gamelist.xml updated with remote ROMs.\n\nRemote ROMs will appear in your $system folder in ES-DE.\nGames are downloaded on first launch."
       else
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nRemote folder created. The gamelist will be refreshed when you browse."
+        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nGamelist structure created. The listing will be refreshed when you browse."
       fi
       refresh=true
       ;;
@@ -1666,7 +1653,7 @@ configurator_remote_roms_manage_system_dialog() {
       (
         echo "0"
         echo "# Refreshing ROM listing..."
-        remote_roms_refresh_system_listing "$system"
+        remote_roms_refresh_system "$system"
         echo "100"
         echo "# Complete"
       ) | rd_zenity --progress --no-cancel --pulsate --auto-close \
@@ -1678,12 +1665,12 @@ configurator_remote_roms_manage_system_dialog() {
       refresh=true
       ;;
     "Enable Auto-refresh")
-      remote_roms_set_system_auto_refresh "$system" "true"
+      jq --arg s "$system" '.remote_roms.systems[$s].auto_refresh = true' "$rd_conf" > "${rd_conf}.tmp" && mv "${rd_conf}.tmp" "$rd_conf"
       configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-refresh enabled for $system.</b></span>\n\nROM listing will be refreshed on startup."
       refresh=true
       ;;
     "Disable Auto-refresh")
-      remote_roms_set_system_auto_refresh "$system" "false"
+      jq --arg s "$system" '.remote_roms.systems[$s].auto_refresh = false' "$rd_conf" > "${rd_conf}.tmp" && mv "${rd_conf}.tmp" "$rd_conf"
       configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-refresh disabled for $system.</b></span>\n\nYou'll need to refresh Rom listings manually."
       refresh=true
       ;;
@@ -1693,8 +1680,7 @@ configurator_remote_roms_manage_system_dialog() {
         --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
         --text="<span foreground='$purple'><b>Remove $system configuration?</b></span>\n\nThis will remove all settings and cached data for this system."
       if [[ $? -eq 0 ]]; then
-        remote_roms_remove_system "$system"
-        remote_roms_remove_esde_integration "$system"
+        remote_roms_disable_system "$system"
         configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configuration removed.</b></span>\n\nThe system is no longer configured for remote ROMs."
       fi
       refresh=true

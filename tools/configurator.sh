@@ -23,8 +23,9 @@ source /app/libexec/global.sh
 #         - Universal Dynamic Input Textures: Primehack
 #         - PortMaster: Hide
 #      - Remote Connection
+#       - Sync Systems
+#       - Manage Systems
 #       - Connection Settings
-#       - Refresh All Rom Lists
 #       - Test Connection
 #     - Open Component (Behind one-time power user warning dialog)
 #       - Dynamically generated list of emulators from open_component --list and --getdesc (features.json)
@@ -402,13 +403,6 @@ configurator_remote_dialog() {
   # USAGE: configurator_remote_dialog
 
   log i "Opening Remote Connection dialog"
-
-  # Initialize config if needed
-  remote_roms_init_config
-
-  local remote_rom_enabled=$(remote_roms_get_setting "remote_rom_enabled")
-  local status_text="Disabled"
-  [[ "$remote_rom_enabled" == "true" ]] && status_text="Enabled"
 
   local menu_options=(
     "Sync Systems" "Auto-discover and enable systems from remote server"
