@@ -1493,7 +1493,7 @@ configurator_remote_roms_refresh_dialog() {
     return
   fi
 
-  # Step 4: Enable selected systems (combines add + auto_refresh + ES-DE integration)
+  # Step 4: Enable selected systems
   log i "Enabling $enable_count systems for remote ROMs"
   for system in "${systems_to_enable[@]}"; do
     local remote_path=$(echo "$discovered" | jq -r --arg s "$system" '.[$s]')
@@ -1593,34 +1593,25 @@ configurator_remote_roms_manage_system_dialog() {
 
   # Check current status 
   local existing_config=$(jq -r --arg s "$system" '.remote_roms.systems[$s] // empty' "$rd_conf")
-  local is_configured=$([[ -n "$existing_config" ]] && echo "true" || echo "false")
   local auto_refresh="false"
   [[ "$is_configured" == "true" ]] && auto_refresh=$(echo "$existing_config" | jq -r '.auto_refresh // false')
 
-  # Build status text
-  local status_text="Not configured"
-  [[ "$is_configured" == "true" ]] && status_text="Configured"
 
   local auto_refresh_text="Off"
   [[ "$auto_refresh" == "true" ]] && auto_refresh_text="On"
 
   # Determine available actions
   local menu_options=()
+  menu_options+=("Refresh Cache" "Update ROM listing from remote server")
 
-  if [[ "$is_configured" == "false" ]]; then
-    menu_options+=("Enable Remote ROMs" "Set up this system for remote access")
-  else
-    # Cache management actions
-    menu_options+=("Refresh Cache" "Update ROM listing from remote server")
-
-    if [[ "$auto_refresh" == "true" ]]; then
+  if [[ "$auto_refresh" == "true" ]]; then
       menu_options+=("Disable Auto-refresh" "Don't auto-refresh cache on startup")
     else
       menu_options+=("Enable Auto-refresh" "Auto-refresh cache on startup")
-    fi
-
-    menu_options+=("Remove Configuration" "Stop using remote ROMs for this system")
   fi
+
+  menu_options+=("Remove Configuration" "Stop using remote ROMs for this system")
+
 
   choice=$(rd_zenity --list \
     --title "RetroDECK Configurator - Manage $system" \
@@ -1640,15 +1631,6 @@ configurator_remote_roms_manage_system_dialog() {
 
   # Handle the choice and refresh the dialog if needed
   case "$choice" in
-    "Enable Remote ROMs")
-      # Enable system (combines add + auto-refresh + ES-DE integration + refresh)
-      if remote_roms_enable_system "$system" "$system"; then
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured and ready!</b></span>\n\nES-DE gamelist.xml updated with remote ROMs.\n\nRemote ROMs will appear in your $system folder in ES-DE.\nGames are downloaded on first launch."
-      else
-        configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configured for remote ROMs.</b></span>\n\nGamelist structure created. The listing will be refreshed when you browse."
-      fi
-      refresh=true
-      ;;
     "Refresh Cache")
       (
         echo "0"
@@ -1661,17 +1643,20 @@ configurator_remote_roms_manage_system_dialog() {
         --text="Updating ROM listing for $system..." \
         --width=400 --height=100
       
+      log i "Cache refreshed for $system, showing confirmation dialog"
       configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Cache refreshed for $system!</b></span>\n\nROM listing is now up to date."
       refresh=true
       ;;
     "Enable Auto-refresh")
       jq --arg s "$system" '.remote_roms.systems[$s].auto_refresh = true' "$rd_conf" > "${rd_conf}.tmp" && mv "${rd_conf}.tmp" "$rd_conf"
       configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-refresh enabled for $system.</b></span>\n\nROM listing will be refreshed on startup."
+      log i "Auto-refresh enabled for $system, updating config and refreshing dialog"
       refresh=true
       ;;
     "Disable Auto-refresh")
       jq --arg s "$system" '.remote_roms.systems[$s].auto_refresh = false' "$rd_conf" > "${rd_conf}.tmp" && mv "${rd_conf}.tmp" "$rd_conf"
       configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>Auto-refresh disabled for $system.</b></span>\n\nYou'll need to refresh Rom listings manually."
+      log i "Auto-refresh disabled for $system, updating config and refreshing dialog"
       refresh=true
       ;;
     "Remove Configuration")
@@ -1680,9 +1665,11 @@ configurator_remote_roms_manage_system_dialog() {
         --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
         --text="<span foreground='$purple'><b>Remove $system configuration?</b></span>\n\nThis will remove all settings and cached data for this system."
       if [[ $? -eq 0 ]]; then
+        log i "User confirmed removal of $system configuration, proceeding to disable and remove data"
         remote_roms_disable_system "$system"
         configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configuration removed.</b></span>\n\nThe system is no longer configured for remote ROMs."
       fi
+      log i "$system configuration removed, refreshing systems list"
       refresh=true
       ;;
   esac
