@@ -1666,9 +1666,13 @@ configurator_remote_roms_manage_system_dialog() {
         log i "User confirmed removal of $system configuration, proceeding to disable and remove data"
         remote_roms_disable_system "$system"
         configurator_generic_dialog "RetroDECK Configurator" "<span foreground='$purple'><b>$system configuration removed.</b></span>\n\nThe system is no longer configured for remote ROMs."
+        log i "$system configuration removed, returning to systems list"
+        configurator_remote_roms_manage_systems_list_dialog
+        return
+      else
+        log i "User cancelled removal of $system configuration, returning to manage dialog"
+        refresh=true
       fi
-      log i "$system configuration removed, refreshing systems list"
-      refresh=true
       ;;
   esac
 

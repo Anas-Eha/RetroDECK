@@ -13,6 +13,8 @@
 rom_path="$1"
 game_name="$2"
 system_name="$3"
+rclone_config="${XDG_CONFIG_HOME}/rclone/rclone.conf"
+rclone_bin="/app/bin/rclone"
 
 # Unescape the path (ES-DE passes shell-escaped paths with \ before spaces/special chars)
 rom_path=$(echo "$rom_path" | sed 's/\\//g')
@@ -46,8 +48,7 @@ fi
 log i "Game '$rom_name' not found locally for system '$system_name', attempting remote download"
 mkdir -p "$roms_path/$system_name"
 temp_file="${local_rom_path}.tmp.$$"
-rclone_config="${XDG_CONFIG_HOME}/retrodeck/rclone/rclone.conf"
-rclone_bin="/app/bin/rclone"
+
 
 # Get remote path from config for this system
 remote_system_path=$(jq -r ".remote_roms.systems[\"$system_name\"].remote_path // \"$system_name\"" "$rd_conf" 2>/dev/null)

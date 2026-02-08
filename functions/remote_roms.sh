@@ -13,9 +13,9 @@
 # ============================================
 # Constants
 # ============================================
-readonly REMOTE_ROMS_RCLONE_CONF="${XDG_CONFIG_HOME}/retrodeck/rclone/rclone.conf"
+readonly REMOTE_ROMS_RCLONE_CONF="${XDG_CONFIG_HOME}/rclone/rclone.conf"
 readonly ESDE_GAMELIST_DIR="${rd_home_path}/ES-DE/gamelists/"
-
+readonly FIFO_PATH="${XDG_CONFIG_HOME}/config/ES-DE/es-de-command.fifo"
 
 # ============================================
 # Internal Helpers
@@ -182,6 +182,14 @@ remote_roms_enable_system() {
         log e "remote_roms_enable_system: failed to copy gamelist to local"
         return 1
     fi
+
+    if [ -p "$FIFO_PATH" ]; then
+        echo "RESCAN" > "$FIFO_PATH"
+        log i "ES-DE rescan triggered after disabling system '${system}'"
+    else
+        log w "ES-DE not running (FIFO not found), rescan not triggered"
+    fi
+
 }
 
 # ============================================
@@ -222,6 +230,13 @@ remote_roms_disable_system() {
     fi
 
     log i "remote_roms_disable_system: system '${system}' disabled successfully"
+
+    if [ -p "$FIFO_PATH" ]; then
+        echo "RESCAN" > "$FIFO_PATH"
+        log i "ES-DE rescan triggered after disabling system '${system}'"
+    else
+        log w "ES-DE not running (FIFO not found), rescan not triggered"
+    fi
 }
 
 # ============================================
