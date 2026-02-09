@@ -15,7 +15,7 @@
 # ============================================
 readonly REMOTE_ROMS_RCLONE_CONF="${XDG_CONFIG_HOME}/rclone/rclone.conf"
 readonly ESDE_GAMELIST_DIR="${rd_home_path}/ES-DE/gamelists/"
-readonly FIFO_PATH="${XDG_CONFIG_HOME}/config/ES-DE/es-de-command.fifo"
+readonly FIFO_PATH="${XDG_CONFIG_HOME}/ES-DE/es-de-command.fifo"
 
 # ============================================
 # Internal Helpers
