@@ -409,6 +409,7 @@ configurator_remote_dialog() {
     "Manage Systems" "View and configure individual remote systems"
     "Connection Settings" "Configure remote server URL, username and password"
     "Test Connection" "Test the remote server connection"
+    "Disable All" "Disable all remote connections and clear settings"
   )
 
   choice=$(rd_zenity --list \
@@ -438,6 +439,9 @@ configurator_remote_dialog() {
       ;;
     "Test Connection")
       configurator_remote_roms_test_dialog
+      ;;
+    "Disable All")
+      configurator_remote_roms_disable_all_dialog
       ;;
     *)
       configurator_remote_dialog

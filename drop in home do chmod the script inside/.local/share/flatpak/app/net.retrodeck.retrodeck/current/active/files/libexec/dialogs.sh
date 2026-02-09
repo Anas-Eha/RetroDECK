@@ -1706,6 +1706,80 @@ configurator_remote_roms_manage_system_dialog() {
   done  # End of while loop - dialog refreshes if refresh=true
 }
 
+configurator_remote_roms_disable_all_dialog() {
+  # Dialog to disable all remote connections and clear all settings
+  # USAGE: configurator_remote_roms_disable_all_dialog
+
+  log i "Opening Disable All Remote Connections dialog"
+
+  # Check if there are any enabled systems or connection settings
+  local enabled_systems
+  enabled_systems=$(jq -r '.remote_roms.systems | keys | length' "$rd_conf" 2>/dev/null)
+  local current_url=$(jq -r '.remote_roms.remote_url // ""' "$rd_conf" 2>/dev/null)
+
+  if [[ "$enabled_systems" == "0" && -z "$current_url" ]]; then
+    configurator_generic_dialog "RetroDECK Configurator - Remote Connection" "<span foreground='$purple'><b>No remote connections configured.</b></span>\n\nThere are no remote systems or connection settings to disable."
+    configurator_remote_dialog
+    return
+  fi
+
+  # Show confirmation dialog
+  rd_zenity --question \
+    --title "RetroDECK Configurator - Disable All Remote Connections" \
+    --window-icon="/app/share/icons/hicolor/scalable/apps/net.retrodeck.retrodeck.svg" \
+    --text="<span foreground='$purple'><b>Disable all remote connections?</b></span>\n\nThis will:\n• Disable all remote systems ($enabled_systems currently enabled)\n• Clear connection settings (URL, username, password)\n• Remove cached remote gamelists\n• Rebuild local-only gamelists\n\n<span foreground='$purple'><b>This action cannot be undone.</b></span>\n\nYour local ROMs and saves will not be affected."
+
+  if [[ $? -ne 0 ]]; then
+    log i "User cancelled disable all remote connections"
+    configurator_remote_dialog
+    return
+  fi
+
+  # Proceed with disabling - loop through all systems directly
+  log i "User confirmed disable all remote connections"
+
+  (
+    echo "0"
+    echo "# Disabling all remote systems..."
+
+    # Get all enabled systems and disable them one by one
+    local enabled_systems_list
+    enabled_systems_list=$(jq -r '.remote_roms.systems | keys[]' "$rd_conf" 2>/dev/null)
+    local total_systems=$(jq -r '.remote_roms.systems | keys | length' "$rd_conf" 2>/dev/null)
+    local current=0
+
+    if [[ -n "$enabled_systems_list" ]]; then
+      while IFS= read -r system; do
+        [[ -z "$system" ]] && continue
+        ((current++))
+        echo "# Disabling system: $system ($current/$total_systems)"
+        remote_roms_disable_system "$system" >/dev/null 2>&1
+        local progress=$((current * 100 / total_systems))
+        echo "$progress"
+      done <<< "$enabled_systems_list"
+    fi
+
+    echo "# Clearing connection settings..."
+    echo "95"
+
+    # Clear connection URL
+    jq '.remote_roms.remote_url = ""' "$rd_conf" > "${rd_conf}.tmp" && mv "${rd_conf}.tmp" "$rd_conf" 2>/dev/null || true
+
+    # Remove rclone config
+    [[ -f "$REMOTE_ROMS_RCLONE_CONF" ]] && rm -f "$REMOTE_ROMS_RCLONE_CONF" 2>/dev/null || true
+
+    echo "100"
+    echo "# All remote connections disabled"
+  ) | rd_zenity --progress --auto-close \
+    --title "RetroDECK - Disabling Remote Connections" \
+    --text="Starting..." \
+    --width=400 --height=100
+
+  configurator_generic_dialog "RetroDECK Configurator - Remote Connection" "<span foreground='$purple'><b>All remote connections disabled.</b></span>\n\nAll remote systems have been disabled and connection settings have been cleared.\n\nYour local ROMs and saves are unchanged."
+
+  configurator_remote_dialog
+}
+
 finit_install_controller_profile_dialog() {
   get_steam_user "finit"
   if [[ -n "$steam_id" ]]; then

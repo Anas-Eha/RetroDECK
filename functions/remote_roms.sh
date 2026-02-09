@@ -22,31 +22,22 @@ readonly SLUG_MAPPINGS_FILE="$rd_core_files/reference_lists/remote_roms_slug_map
 # Internal Helpers
 # ============================================
 
-_compute_fingerprint_local() {
-    # Compute sha256 fingerprint of ROM directory (filenames only)
-    local system="$1"
-    local roms_dir="${roms_path}/${system}"
+_compute_fingerprint() {
+    # Compute sha256 fingerprint of a path (file or directory)
+    # Usage: _compute_fingerprint <path>
+    # For directories: fingerprints sorted filenames
+    # For files: fingerprints file content
+    local target_path="$1"
     
-    if [[ ! -d "$roms_dir" ]]; then
+    if [[ -d "$target_path" ]]; then
+        # Directory: fingerprint sorted filenames
+        ls -1 "$target_path" 2>/dev/null | sort | sha256sum | cut -d' ' -f1
+    elif [[ -f "$target_path" ]]; then
+        # File: fingerprint content
+        sha256sum "$target_path" | cut -d' ' -f1
+    else
         echo ""
-        return
     fi
-    
-    ls -1 "$roms_dir" 2>/dev/null | sort | sha256sum | cut -d' ' -f1
-}
-
-_compute_fingerprint_remote() {
-    # Compute sha256 fingerprint of remote gamelist content
-    local system="$1"
-    local dir="${ESDE_GAMELIST_DIR}/${system}"
-    local remote_file="${dir}/gamelist.xml.remote"
-    
-    if [[ ! -f "$remote_file" ]]; then
-        echo ""
-        return
-    fi
-    
-    sha256sum "$remote_file" | cut -d' ' -f1
 }
 
 _read_fingerprint() {
@@ -102,127 +93,129 @@ _build_local_gamelist() {
     log i "_build_local_gamelist: built local gamelist with $(grep -c '<game>' "$local_file" 2>/dev/null || echo 0) entries"
 }
 
-_extract_and_split_metadata() {
-    # Extract metadata from gamelist.xml and MERGE with existing metadata
-    # Preserves metadata for games not currently in gamelist (already downloaded, etc.)
+_extract_metadata() {
+    # Extract metadata from gamelist.xml into pipe-separated cache for fast lookup
+    # Deduplicates by path: prefers entries with MORE fields, ties go to LAST occurrence
+    # Atomic write: only replaces cache if extraction succeeds, preserving previous cache on failure
     local system="$1"
     local dir="${ESDE_GAMELIST_DIR}/${system}"
     local gamelist="${dir}/gamelist.xml"
-    local local_file="${dir}/gamelist.xml.local"
-    local remote_file="${dir}/gamelist.xml.remote"
-    local meta_local="${dir}/gamelist.xml.metadata.local"
-    local meta_remote="${dir}/gamelist.xml.metadata.remote"
-    local tmp_local=$(mktemp)
-    local tmp_remote=$(mktemp)
+    local cache_file="${dir}/.rd_internal.metadata"
+    local cache_tmp="${cache_file}.tmp.$$"
     
-    log d "_extract_and_split_metadata: extracting metadata for system='${system}'"
+    log d "_extract_metadata: extracting metadata for system='${system}'"
     
-    # Load existing metadata into temp files (preserve what we have)
-    [[ -f "$meta_local" ]] && cp "$meta_local" "$tmp_local" || > "$tmp_local"
-    [[ -f "$meta_remote" ]] && cp "$meta_remote" "$tmp_remote" || > "$tmp_remote"
+    [[ ! -f "$gamelist" ]] && return
     
-    [[ ! -f "$gamelist" ]] && { rm -f "$tmp_local" "$tmp_remote"; return; }
-    
-    # Build path sets for routing
-    declare -A local_paths remote_paths
-    [[ -f "$local_file" ]] && while read -r p; do local_paths["$p"]=1; done < <(sed -n 's|.*<path>\./\(.*\)</path>.*|\1|p' "$local_file")
-    [[ -f "$remote_file" ]] && while read -r p; do remote_paths["$p"]=1; done < <(sed -n 's|.*<path>\./\(.*\)</path>.*|\1|p' "$remote_file")
-    
-    # Extract metadata from gamelist.xml and update temp files
-    xmlstarlet sel -t -m "//game" \
-        -v "path" -o "|" -v "name" -o "|" \
-        -i "desc" -v "desc" -b -o "|" \
-        -i "image" -v "image" -b -o "|" \
-        -i "rating" -v "rating" -b -o "|" \
-        -i "releasedate" -v "releasedate" -b -o "|" \
-        -i "developer" -v "developer" -b -o "|" \
-        -i "publisher" -v "publisher" -b -o "|" \
-        -i "genre" -v "genre" -b -o "|" \
-        -i "players" -v "players" -b -o "|" \
-        -i "hidden" -v "hidden" -b -n "$gamelist" 2>/dev/null | \
-    while IFS='|' read -r path name desc image rating releasedate developer publisher genre players hidden; do
-        [[ -z "$path" ]] && continue
-        local clean_path="${path#./}"
-        local line="${path}|${name}|${desc}|${image}|${rating}|${releasedate}|${developer}|${publisher}|${genre}|${players}|${hidden}"
-        
-        # Update or add to appropriate temp file
-        if [[ -n "${local_paths[$clean_path]}" ]]; then
-            grep -v "^${path}|" "$tmp_local" > "${tmp_local}.new" 2>/dev/null || cp "$tmp_local" "${tmp_local}.new"
-            echo "$line" >> "${tmp_local}.new"
-            mv "${tmp_local}.new" "$tmp_local"
-        fi
-        if [[ -n "${remote_paths[$clean_path]}" ]]; then
-            grep -v "^${path}|" "$tmp_remote" > "${tmp_remote}.new" 2>/dev/null || cp "$tmp_remote" "${tmp_remote}.new"
-            echo "$line" >> "${tmp_remote}.new"
-            mv "${tmp_remote}.new" "$tmp_remote"
-        fi
-    done
-    
-    # Move temp files to final location
-    mv "$tmp_local" "$meta_local"
-    mv "$tmp_remote" "$meta_remote"
-    
-    log i "_extract_and_split_metadata: local=$(wc -l < "$meta_local" 2>/dev/null || echo 0) remote=$(wc -l < "$meta_remote" 2>/dev/null || echo 0)"
+    # Single-pass extraction: path|weight|desc|image|rating|releasedate|developer|publisher|genre|players|hidden
+    # Sort by path, weight DESC - stable sort keeps last occurrence for ties
+    if xmlstarlet sel -t \
+        -m "//game" \
+        -v "path" -o "|" -v "count(*)" -o "|" \
+        -v "desc" -o "|" \
+        -v "image" -o "|" \
+        -v "rating" -o "|" \
+        -v "releasedate" -o "|" \
+        -v "developer" -o "|" \
+        -v "publisher" -o "|" \
+        -v "genre" -o "|" \
+        -v "players" -o "|" \
+        -v "hidden" -n \
+        "$gamelist" 2>/dev/null | \
+    sort -t'|' -k1,1 -k2,2nr -s | \
+    awk -F'|' '!seen[$1]++ {print $1"|"$3"|"$4"|"$5"|"$6"|"$7"|"$8"|"$9"|"$10"|"$11}' > "$cache_tmp" && \
+    [[ -s "$cache_tmp" ]]; then
+        mv "$cache_tmp" "$cache_file"
+        log i "_extract_metadata: cached $(wc -l < "$cache_file" 2>/dev/null || echo 0) entries for system='${system}'"
+    else
+        rm -f "$cache_tmp"
+        log w "_extract_metadata: extraction failed or empty, preserving existing cache for system='${system}'"
+    fi
 }
 
 _inject_metadata() {
-    # Inject metadata into gamelist XML
+    # Inject metadata from cache file into gamelist XML using associative arrays
     local base_file="$1"
-    shift
+    local dir="${base_file%/*}"
+    local cache_file="${dir}/.rd_internal.metadata"
+    local tmp_output=$(mktemp)
     
-    awk -F'|' '
-        NR==FNR {
-            if (FNR==1) nextfile
-            meta[$1] = $0
-            next
-        }
-        /<game>/ { in_game=1; game=""; path="" }
-        in_game {
-            game = game $0 "\n"
-            if (/<path>/) {
-                match($0, /<path>(\.\/[^<]+)<\/path>/, arr)
-                path = arr[1]
-            }
-        }
-        /<\/game>/ {
-            in_game=0
-            print "  <game>"
-            # Print path and name from original
-            if (match(game, /<path>[^<]+<\/path>/)) print "    " substr(game, RSTART, RLENGTH)
-            if (match(game, /<name>[^<]+<\/name>/)) print "    " substr(game, RSTART, RLENGTH)
-            # Inject metadata if available
-            if (path in meta) {
-                split(meta[path], m, "|")
-                if (m[3] != "") print "    <desc>" m[3] "</desc>"
-                if (m[4] != "") print "    <image>" m[4] "</image>"
-                if (m[5] != "") print "    <rating>" m[5] "</rating>"
-                if (m[6] != "") print "    <releasedate>" m[6] "</releasedate>"
-                if (m[7] != "") print "    <developer>" m[7] "</developer>"
-                if (m[8] != "") print "    <publisher>" m[8] "</publisher>"
-                if (m[9] != "") print "    <genre>" m[9] "</genre>"
-                if (m[10] != "") print "    <players>" m[10] "</players>"
-                if (m[11] != "") print "    <hidden>" m[11] "</hidden>"
-            }
-            print "  </game>"
-        }
-        /^<\?xml|^<gameList>/ { print }
-        /^<\/gameList>/ { print }
-    ' "$@" "$base_file"
+    # If no cache, just copy base file
+    if [[ ! -s "$cache_file" ]]; then
+        cat "$base_file"
+        return
+    fi
+    
+    # Build associative arrays from cache: path -> metadata field
+    declare -A meta_desc meta_image meta_rating meta_releasedate meta_developer meta_publisher meta_genre meta_players meta_hidden
+    local path desc image rating releasedate developer publisher genre players hidden
+    
+    while IFS='|' read -r path desc image rating releasedate developer publisher genre players hidden; do
+        [[ -z "$path" ]] && continue
+        meta_desc["$path"]="$desc"
+        meta_image["$path"]="$image"
+        meta_rating["$path"]="$rating"
+        meta_releasedate["$path"]="$releasedate"
+        meta_developer["$path"]="$developer"
+        meta_publisher["$path"]="$publisher"
+        meta_genre["$path"]="$genre"
+        meta_players["$path"]="$players"
+        meta_hidden["$path"]="$hidden"
+    done < "$cache_file"
+    
+    # Generate output XML with inlined metadata
+    {
+        echo '<?xml version="1.0"?>'
+        echo '<gameList>'
+        
+        # Process each game in base file
+        xmlstarlet sel -t -m "//game" \
+            -v "path" -o "|" \
+            -v "name" -n \
+            "$base_file" 2>/dev/null | \
+        while IFS='|' read -r path name; do
+            [[ -z "$path" ]] && continue
+            local clean_path="${path#./}"
+            [[ -z "$name" ]] && name="$clean_path"
+            
+            echo "  <game>"
+            echo "    <path>$path</path>"
+            echo "    <name>$(echo "$name" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')</name>"
+            [[ -n "${meta_desc[$path]}" ]] && echo "    <desc>$(echo "${meta_desc[$path]}" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')</desc>"
+            [[ -n "${meta_image[$path]}" ]] && echo "    <image>${meta_image[$path]}</image>"
+            [[ -n "${meta_rating[$path]}" ]] && echo "    <rating>${meta_rating[$path]}</rating>"
+            [[ -n "${meta_releasedate[$path]}" ]] && echo "    <releasedate>${meta_releasedate[$path]}</releasedate>"
+            [[ -n "${meta_developer[$path]}" ]] && echo "    <developer>$(echo "${meta_developer[$path]}" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')</developer>"
+            [[ -n "${meta_publisher[$path]}" ]] && echo "    <publisher>$(echo "${meta_publisher[$path]}" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')</publisher>"
+            [[ -n "${meta_genre[$path]}" ]] && echo "    <genre>$(echo "${meta_genre[$path]}" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')</genre>"
+            [[ -n "${meta_players[$path]}" ]] && echo "    <players>${meta_players[$path]}</players>"
+            [[ -n "${meta_hidden[$path]}" ]] && echo "    <hidden>${meta_hidden[$path]}</hidden>"
+            echo "  </game>"
+        done
+        
+        echo '</gameList>'
+    } > "$tmp_output"
+    
+    if [[ -s "$tmp_output" ]]; then
+        cat "$tmp_output"
+    else
+        cat "$base_file"
+    fi
+    
+    rm -f "$tmp_output"
 }
 
-_merge_gamelists_with_metadata() {
-    # Merge local + remote gamelists AND their metadata
+_merge_gamelists() {
+    # Merge local + remote gamelists and inject metadata
     local system="$1"
     local include_remote="${2:-true}"
     local dir="${ESDE_GAMELIST_DIR}/${system}"
     local local_file="${dir}/gamelist.xml.local"
     local remote_file="${dir}/gamelist.xml.remote"
-    local meta_local="${dir}/gamelist.xml.metadata.local"
-    local meta_remote="${dir}/gamelist.xml.metadata.remote"
     local working_file="${dir}/gamelist.xml"
     local tmp="${working_file}.tmp"
     
-    log d "_merge_gamelists_with_metadata: merging for system='${system}' include_remote='${include_remote}'"
+    log d "_merge_gamelists: merging for system='${system}' include_remote='${include_remote}'"
     
     mkdir -p "$dir"
     
@@ -231,33 +224,25 @@ _merge_gamelists_with_metadata() {
         echo '<?xml version="1.0"?>'
         echo '<gameList>'
         
-        # Add local entries (extract just the <game> blocks)
+        # Add local entries (skip XML declaration, opening <gameList> and closing </gameList>)
         if [[ -f "$local_file" ]]; then
-            sed -n '/<game>/,/<\/game>/p' "$local_file"
+            tail -n +3 "$local_file" | head -n -1
         fi
         
-        # Add remote entries if enabled
+        # Add remote entries if enabled (skip XML declaration, opening <gameList> and closing </gameList>)
         if [[ "$include_remote" == "true" && -f "$remote_file" ]]; then
-            sed -n '/<game>/,/<\/game>/p' "$remote_file"
+            tail -n +3 "$remote_file" | head -n -1
         fi
         
         echo '</gameList>'
     } > "$tmp"
     
-    # Inject metadata from appropriate sources
-    local meta_files=()
-    [[ -f "$meta_local" ]] && meta_files+=("$meta_local")
-    [[ "$include_remote" == "true" && -f "$meta_remote" ]] && meta_files+=("$meta_remote")
-    
-    if [[ ${#meta_files[@]} -gt 0 ]]; then
-        _inject_metadata "$tmp" "${meta_files[@]}" > "$working_file"
-    else
-        mv "$tmp" "$working_file"
-    fi
+    # Inject metadata into final gamelist
+    _inject_metadata "$tmp" > "$working_file" || mv "$tmp" "$working_file"
     
     rm -f "$tmp"
     
-    log i "_merge_gamelists_with_metadata: merged gamelist for system='${system}'"
+    log i "_merge_gamelists: merged gamelist for system='${system}'"
 }
 
 _get_config() {
@@ -276,6 +261,32 @@ remote_roms_list_slug_languages() {
     else
         echo "retrodeck|Standard RetroDECK naming"
     fi
+}
+
+_fetch_remote_gamelist() {
+    # Fetch remote gamelist.xml or build from directory. Returns 0 on success.
+    local system="$1" remote_path="$2"
+    local dir="${ESDE_GAMELIST_DIR}/${system}"
+    local tmp="${dir}/gamelist.xml.remote.tmp.$$"
+    
+    # Try fetch gamelist.xml first
+    if rclone --config "$REMOTE_ROMS_RCLONE_CONF" copyto "retrodeck-remote:${remote_path}/gamelist.xml" "$tmp" 2>/dev/null; then
+        mv "$tmp" "${dir}/gamelist.xml.remote"
+        return 0
+    fi
+    
+    # Fallback: build from directory
+    rclone --config "$REMOTE_ROMS_RCLONE_CONF" lsjson "retrodeck-remote:${remote_path}" 2>/dev/null | \
+        jq -r '.[] | select(.IsDir == false) | "  <game><path>./\(.Name)</path><name>\(.Name)</name></game>"' | \
+        { echo '<?xml version="1.0"?>'; echo '<gameList>'; cat; echo '</gameList>'; } > "$tmp" 2>/dev/null
+    
+    if [[ -s "$tmp" ]]; then
+        mv "$tmp" "${dir}/gamelist.xml.remote"
+        return 0
+    fi
+    
+    rm -f "$tmp"
+    return 1
 }
 
 _get_slug_mapping() {
@@ -307,12 +318,6 @@ _set_config() {
         log e "_set_config: failed to set key='${key}'"
         return 1
     fi
-}
-
-_merge_gamelists() {
-    # Legacy merge - redirects to metadata-aware merge
-    # Maintains backward compatibility with include_remote=true
-    _merge_gamelists_with_metadata "$1" "true"
 }
 
 # ============================================
@@ -399,49 +404,28 @@ remote_roms_enable_system() {
     
     mkdir -p "$dir"
     
-    # Rebuild local from current ROM directory
+    # FIRST: Build local gamelist from current ROM directory
     _build_local_gamelist "$system"
-    _write_fingerprint "$system" "local" "$(_compute_fingerprint_local "$system")"
+    _write_fingerprint "$system" "local" "$(_compute_fingerprint "${roms_path}/${system}")"
+    
+    # SECOND: Extract existing metadata from gamelist.xml
+    # This preserves all scraped metadata for games
+    if [[ -f "${dir}/gamelist.xml" ]]; then
+        log d "remote_roms_enable_system: preserving existing metadata from gamelist.xml"
+        _extract_metadata "$system"
+    fi
     
     # Fetch remote gamelist
     _fetch_remote_gamelist "$system" "$remote_path" || echo -e '<?xml version="1.0"?>\n<gameList>\n</gameList>' > "${dir}/gamelist.xml.remote"
-    _write_fingerprint "$system" "remote" "$(_compute_fingerprint_remote "$system")"
+    _write_fingerprint "$system" "remote" "$(_compute_fingerprint "${dir}/gamelist.xml.remote")"
     
-    # Extract metadata from current gamelist.xml (preserves existing metadata)
-    _extract_and_split_metadata "$system"
-    
-    # Merge with metadata injected
-    _merge_gamelists_with_metadata "$system" "true"
+    # Merge local + remote with metadata injection
+    _merge_gamelists "$system" "true"
     
     log i "remote_roms_enable_system: system '${system}' enabled"
     [[ -p "$FIFO_PATH" ]] && echo "RESCAN" > "$FIFO_PATH"
 }
 
-_fetch_remote_gamelist() {
-    # Fetch remote gamelist.xml or build from directory. Returns 0 on success.
-    local system="$1" remote_path="$2"
-    local dir="${ESDE_GAMELIST_DIR}/${system}"
-    local tmp="${dir}/gamelist.xml.remote.tmp.$$"
-    
-    # Try fetch gamelist.xml first
-    if rclone --config "$REMOTE_ROMS_RCLONE_CONF" copyto "retrodeck-remote:${remote_path}/gamelist.xml" "$tmp" 2>/dev/null; then
-        mv "$tmp" "${dir}/gamelist.xml.remote"
-        return 0
-    fi
-    
-    # Fallback: build from directory
-    rclone --config "$REMOTE_ROMS_RCLONE_CONF" lsjson "retrodeck-remote:${remote_path}" 2>/dev/null | \
-        jq -r '.[] | select(.IsDir == false) | "  <game><path>./\(.Name)</path><name>\(.Name)</name></game>"' | \
-        { echo '<?xml version="1.0"?>'; echo '<gameList>'; cat; echo '</gameList>'; } > "$tmp" 2>/dev/null
-    
-    if [[ -s "$tmp" ]]; then
-        mv "$tmp" "${dir}/gamelist.xml.remote"
-        return 0
-    fi
-    
-    rm -f "$tmp"
-    return 1
-}
 
 # ============================================
 # 4. Disable System (Remove Integration)
@@ -453,10 +437,10 @@ remote_roms_disable_system() {
     
     log i "remote_roms_disable_system: disabling remote ROMs for system='${system}'"
     
-    _extract_and_split_metadata "$system"
+    _extract_metadata "$system"
     jq "del(.remote_roms.systems[\"$system\"])" "$rd_conf" > "${rd_conf}.tmp" && mv "${rd_conf}.tmp" "$rd_conf"
     
-    _merge_gamelists_with_metadata "$system" "false"
+    _merge_gamelists "$system" "false"
     rm -f "${dir}/gamelist.xml.remote" "${dir}/.fingerprint.remote"
     
     log i "remote_roms_disable_system: system '${system}' disabled"
@@ -477,15 +461,16 @@ remote_roms_refresh_system() {
     
     log i "remote_roms_refresh_system: refreshing ${system}"
     
-    _extract_and_split_metadata "$system"
+    _extract_metadata "$system"
     _fetch_remote_gamelist "$system" "$remote_path" || echo -e '<?xml version="1.0"?>\n<gameList>\n</gameList>' > "${dir}/gamelist.xml.remote"
-    _write_fingerprint "$system" "remote" "$(_compute_fingerprint_remote "$system")"
+    _write_fingerprint "$system" "remote" "$(_compute_fingerprint "${dir}/gamelist.xml.remote")"
     
     _build_local_gamelist "$system"
-    _write_fingerprint "$system" "local" "$(_compute_fingerprint_local "$system")"
+    _write_fingerprint "$system" "local" "$(_compute_fingerprint "${roms_path}/${system}")"
     
-    _merge_gamelists_with_metadata "$system" "true"
+    _merge_gamelists "$system" "true"
     log i "remote_roms_refresh_system: refreshed ${system}"
+    [[ -p "$FIFO_PATH" ]] && echo "RESCAN" > "$FIFO_PATH"
 }
 
 # ============================================
@@ -599,39 +584,42 @@ remote_roms_discover_systems() {
 remote_roms_startup_check() {
     # Single startup check: handles both local changes and remote refresh
     log i "remote_roms_startup_check: starting"
-    
+    local rescan_needed=false
+        
     # Check all managed systems for local changes
-    local changed_systems=()
     if [[ -d "$ESDE_GAMELIST_DIR" ]]; then
         for gamelist in "$ESDE_GAMELIST_DIR"/*/gamelist.xml; do
             [[ -f "$gamelist" ]] || continue
             local system=$(basename "$(dirname "$gamelist")")
             [[ ! -d "${roms_path}/${system}" ]] && continue
             
-            local current_fp=$(_compute_fingerprint_local "$system")
+            local current_fp=$(_compute_fingerprint "${roms_path}/${system}")
             local stored_fp=$(_read_fingerprint "$system" "local")
             
             if [[ "$current_fp" != "$stored_fp" ]]; then
                 log i "startup_check: local change detected for ${system}"
-                _extract_and_split_metadata "$system"
+                _extract_metadata "$system"
                 _build_local_gamelist "$system"
                 _write_fingerprint "$system" "local" "$current_fp"
                 
                 if jq -e ".remote_roms.systems[\"$system\"]" "$rd_conf" >/dev/null 2>&1; then
-                    _merge_gamelists_with_metadata "$system" "true"
+                    _merge_gamelists "$system" "true"
                 else
-                    _merge_gamelists_with_metadata "$system" "false"
+                    _merge_gamelists "$system" "false"
                 fi
-                changed_systems+=("$system")
+                rescan_needed=true
             fi
         done
     fi
     
-    # Lightweight remote refresh for enabled systems (background)
+    # Lightweight remote refresh for enabled systems (process substitution, not pipeline)
     if [[ -f "$REMOTE_ROMS_RCLONE_CONF" ]]; then
-        jq -r '.remote_roms.systems | to_entries[] | select(.value.auto_refresh == true) | .key' "$rd_conf" 2>/dev/null | \
-        while read -r system; do
-            [[ -z "$system" ]] && continue
+        local -a enabled_systems
+        while IFS= read -r system; do
+            [[ -n "$system" ]] && enabled_systems+=("$system")
+        done < <(jq -r '.remote_roms.systems | to_entries[] | select(.value.auto_refresh == true) | .key' "$rd_conf" 2>/dev/null)
+        
+        for system in "${enabled_systems[@]}"; do
             local remote_path=$(_get_config "systems.${system}.remote_path")
             [[ -z "$remote_path" ]] && continue
             
@@ -647,23 +635,22 @@ remote_roms_startup_check() {
             [[ ! -s "$tmp" ]] && { rm -f "$tmp"; continue; }
             
             local new_fp=$(sha256sum "$tmp" | cut -d' ' -f1)
-            local stored_fp=$(_compute_fingerprint_remote "$system")
+            local stored_fp=$(_compute_fingerprint "${dir}/gamelist.xml.remote")
             
             if [[ "$new_fp" != "$stored_fp" ]]; then
                 log i "startup_check: remote updated for ${system}"
                 mv "$tmp" "${dir}/gamelist.xml.remote"
                 _write_fingerprint "$system" "remote" "$new_fp"
-                _merge_gamelists_with_metadata "$system" "true"
-                changed_systems+=("$system")
+                _merge_gamelists "$system" "true"
+                rescan_needed=true
             else
                 rm -f "$tmp"
             fi
         done
     fi
     
-    # Single rescan if anything changed
-    [[ ${#changed_systems[@]} -gt 0 && -p "$FIFO_PATH" ]] && echo "RESCAN" > "$FIFO_PATH"
-    log i "remote_roms_startup_check: done, ${#changed_systems[@]} systems updated"
+    # Send single RESCAN if any changes were made
+    [[ "$rescan_needed" == "true" && -p "$FIFO_PATH" ]] && echo "RESCAN" > "$FIFO_PATH"
+    
+    log i "remote_roms_startup_check: done"
 }
-
-# Legacy functions removed - use remote_roms_startup_check() instead
