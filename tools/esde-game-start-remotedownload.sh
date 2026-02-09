@@ -27,8 +27,8 @@ log d "Checking for local gamelist at '$gamelist_local' and game '$rom_name'"
 # No local gamelist = local-only system, just launch
 [[ ! -f "$gamelist_local" ]] && echo "{\"romPath\": \"$local_rom_path\"}" && exit 0
 
-# Check if game exists in local gamelist
-xmlstarlet sel -t -v "//game[path='./$rom_name']" "$gamelist_local" >/dev/null 2>&1 && \
+# Check if game exists in local gamelist (fast grep check)
+grep -q "<path>\./${rom_name}</path>" "$gamelist_local" 2>/dev/null && \
     echo "{\"romPath\": \"$local_rom_path\"}" && exit 0
 
 # Check if the file exists locally (Use case being the user put a rom in the folder without remote connection)

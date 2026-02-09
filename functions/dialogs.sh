@@ -1369,12 +1369,39 @@ configurator_remote_roms_refresh_dialog() {
     return
   fi
 
+  # Step 0: Select remote server slug language/mapping
+  log i "Prompting for slug language selection"
+  local languages
+  languages=$(remote_roms_list_slug_languages)
+
+  local slug_language="retrodeck"
+  if [[ -n "$languages" ]]; then
+    local lang_array=()
+    while IFS='|' read -r key desc; do
+      lang_array+=("$key" "$desc")
+    done <<< "$languages"
+
+    slug_language=$(rd_zenity --list \
+      --title="RetroDECK Configurator - Remote Server Type" \
+      --text="Select the remote server folder naming convention:" \
+      --column="Key" --column="Description" \
+      "${lang_array[@]}")
+
+    if [[ -z "$slug_language" ]]; then
+      log i "User cancelled slug language selection"
+      configurator_remote_dialog
+      return
+    fi
+  fi
+
+  log i "Selected slug language: $slug_language"
+
   # Step 1: Discover systems on Remote server
   local discovered="{}"
   (
     echo "10"
     echo "# Scanning Remote server for systems..."
-    discovered=$(remote_roms_discover_systems)
+    discovered=$(remote_roms_discover_systems "" "$slug_language")
     echo "$discovered" > /tmp/remote_roms_discovered
     echo "50"
     echo "# Discovery complete"
@@ -1412,7 +1439,7 @@ configurator_remote_roms_refresh_dialog() {
         (
           echo "10"
           echo "# Scanning $manual_path..."
-          discovered=$(remote_roms_discover_systems "$manual_path")
+          discovered=$(remote_roms_discover_systems "$manual_path" "$slug_language")
           echo "$discovered" > /tmp/remote_roms_discovered
           echo "100"
           echo "# Scan complete"

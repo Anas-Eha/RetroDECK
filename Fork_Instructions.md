@@ -12,8 +12,3 @@ Features:
 - Auto discovery of systems presents in the webdav server and fetching or creating gamelist.xml from this (the file used by ES-DE to show roms)
 - Automatic download of remote files when launched in the ES-DE interface
 - Automatic launch after the download of the remote roms (the user experience is smooth on that front)
-
-Issues:
-- If you download a rom outside Retrodeck and not part of those present in the remote server locally, it will not be detected by ES-DE and will never appear for now
-- You need to relaunch retrodeck once or use the utilities menu to redetect roms after any sync or change of the configuration
-- Auto refresh of all gamelists (remote & local) at retrodeck startup is currently not implemented
