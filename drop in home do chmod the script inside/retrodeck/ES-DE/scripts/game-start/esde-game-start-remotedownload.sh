@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# ES-DE Custom Event Script - Ultra Simplified
+# ES-DE Custom Event Script
 # If gamelist.xml.local doesn't exist: launch immediately (local-only system)
 # If gamelist.xml.local exists and game is in it: launch
 # Otherwise: download, append to gamelist.xml.local, launch
@@ -15,6 +15,7 @@ game_name="$2"
 system_name="$3"
 rclone_config="${XDG_CONFIG_HOME}/rclone/rclone.conf"
 rclone_bin="/app/bin/rclone"
+FIFO_PATH="${XDG_CONFIG_HOME}/ES-DE/es-de-command.fifo"
 
 # Unescape the path (ES-DE passes shell-escaped paths with \ before spaces/special chars)
 rom_path=$(echo "$rom_path" | sed 's/\\//g')
@@ -23,6 +24,8 @@ rom_name=$(basename "$rom_path")
 local_rom_path="$roms_path/$system_name/$rom_name"
 gamelist_local="${rd_home_path}/ES-DE/gamelists/${system_name}/gamelist.xml.local"
 log d "Checking for local gamelist at '$gamelist_local' and game '$rom_name'"
+
+
 
 # No local gamelist = local-only system, just launch
 [[ ! -f "$gamelist_local" ]] && echo "{\"romPath\": \"$local_rom_path\"}" && exit 0
@@ -65,11 +68,16 @@ mv "$temp_file" "$local_rom_path" || \
 log d "Downloaded '$rom_name' to '$local_rom_path', updating local gamelist at '$gamelist_local'"
 temp_list="${gamelist_local}.tmp.$$"
 head -n -1 "$gamelist_local" > "$temp_list"
-echo "  <game><path>./$rom_name</path><name>${game_name:-$rom_name}</name></game>" >> "$temp_list"
+echo "  <game>">> "$temp_list"
+echo "    <path>./$rom_name</path>">> "$temp_list"
+echo "    <name>${game_name:-$rom_name}</name>">> "$temp_list"
+echo "  </game>" >> "$temp_list"
 echo '</gameList>' >> "$temp_list"
-xmlstarlet val "$temp_list" >/dev/null 2>&1 && mv "$temp_list" "$gamelist_local"
-rm -f "$temp_list"
+mv "$temp_list" "$gamelist_local"
 
-# Launch
-echo "{\"romPath\": \"$local_rom_path\"}"
+# Launch - tell ESDE to use the local downloaded file
+echo "ES-DE game-start event: system='$system_name', rom_path='$rom_path', game_name='$game_name'"
+
+[[ -p "$FIFO_PATH" ]] && echo "ESDE:MODIFYROMPATH ::$local_rom_path" > "$FIFO_PATH"
+
 exit 0
